@@ -1,0 +1,64 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect v4 Course</title>
+  <meta name="description" content="An eight-lesson course on Effect v4 for TypeScript developers deciding whether to adopt it.">
+  <link rel="stylesheet" href="assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker">Course home · targets <code>effect@4.0.0</code> (stable since 2026-10-01)</p>
+  <h1>Effect v4, from the mental model up</h1>
+  <p class="subtitle">Eight short lessons to help you decide, with evidence, whether Effect is worth adopting.</p>
+
+  <div class="box win">
+    <p class="box-title">The mission</p>
+    <p>By the end you can read real v4 code, rebuild a small service with typed errors, dependency injection and a swappable test layer, spot outdated v3 tutorials, and write a one-page <strong>adopt / pilot / skip</strong> recommendation for your team. (<a href="MISSION.md">MISSION.md</a>)</p>
+  </div>
+
+  <h2>Lessons</h2>
+  <ol class="toc">
+    <li><div><a href="lessons/01-mental-model/index.html">An Effect is a recipe, not a running task</a><span>Lazy descriptions, <code>Effect&lt;A, E, R&gt;</code>, running at the edge.</span></div></li>
+    <li><div><a href="lessons/02-why-effect/index.html">Why not plain TypeScript?</a><span>The problems Effect solves, and the first draft of your cost ledger.</span></div></li>
+    <li><div><a href="lessons/03-building-programs/index.html">Building programs: gen, pipe and fn</a><span>Constructors, <code>Effect.gen</code> as async/await for Effects, pipelines.</span></div></li>
+    <li><div><a href="lessons/04-error-handling/index.html">Errors you can see</a><span>Expected errors vs defects, tagged errors, <code>catchTag</code>.</span></div></li>
+    <li><div><a href="lessons/05-dependency-injection/index.html">Dependency injection: services and Layers</a><span><code>Context.Service</code>, the requirements channel, Layers, swapping layers in tests.</span></div></li>
+    <li><div><a href="lessons/06-resources-and-concurrency/index.html">Resources, concurrency, timeouts and retries</a><span><code>acquireRelease</code>, structured concurrency, <code>Schedule</code>.</span></div></li>
+    <li><div><a href="lessons/07-schema-and-toolbox/index.html">Schema, config and what else is in the box</a><span>One definition for type and validator, Config, stable vs unstable modules.</span></div></li>
+    <li><div><a href="lessons/08-adoption-verdict/index.html">The verdict: should your team adopt Effect?</a><span>Incremental adoption, risk facts, and your written recommendation.</span></div></li>
+  </ol>
+
+  <h2>How each lesson works</h2>
+  <p>Each lesson lives in its own folder under <code>lessons/</code> and has four parts.</p>
+  <ul>
+    <li><code>index.html</code>: the lesson, with a warm-up on earlier lessons, an in-browser quiz and citations to the primary sources.</li>
+    <li><code>exercise.ts</code>: small tasks that check themselves.</li>
+    <li><code>solution.ts</code>: reference answers.</li>
+    <li><code>tsconfig.json</code>: runs the type-level checks for that lesson.</li>
+  </ul>
+  <p>One-time setup, from this <code>effect-v4/</code> folder (needs Node 22.18 or newer):</p>
+  <div class="cmd"><pre><code class="language-bash">npm install</code></pre></div>
+  <p>Then, for lesson <em>NN</em>:</p>
+  <div class="cmd"><pre><code class="language-bash">node lessons/01-mental-model/exercise.ts      # runtime checks
+npx tsc -p lessons/01-mental-model            # type-level checks</code></pre></div>
+
+  <h2>Reference</h2>
+  <ul>
+    <li><a href="reference/cheatsheet.html">Cheat sheet</a>: the core v4 API on one printable page.</li>
+    <li><a href="reference/v3-to-v4.html">Spotting v3 code</a>: old name → v4 name, for when a tutorial or an LLM gives you outdated code.</li>
+    <li><a href="RESOURCES.md">RESOURCES.md</a>: annotated primary sources and the official community.</li>
+    <li><a href="research/effect-v4.md">research/effect-v4.md</a>: the full research notes behind this course, with every claim cited and every snippet run against 4.0.0.</li>
+  </ul>
+
+  <div class="box ask">
+    <p class="box-title">Your teacher is in the chat</p>
+    <p>After any lesson, ask follow-up questions, ask for a harder exercise, or ask “quiz me on lessons 1–3”. Coming back a day later for a quick quiz is one of the most effective ways to make this stick.</p>
+  </div>
+
+</main>
+<script src="assets/course.js"></script>
+</body>
+</html>

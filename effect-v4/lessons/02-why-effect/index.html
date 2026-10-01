@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Why Effect</title>
+  <meta name="description" content="Lesson 2 of the Effect v4 course: the problems plain TypeScript leaves unsolved, what Effect offers instead, and what it costs.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 2 of 8 · about 15 minutes</p>
+  <h1>Why not plain TypeScript?</h1>
+  <p class="subtitle">The problems Effect solves, and what it costs you.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Name four concrete problems plain TypeScript leaves to you, and the Effect answer to each. Then write the first honest draft of your adoption ledger, with the costs included.</p>
+  </div>
+
+  <section class="recall">
+    <h2>Warm-up: from lesson 1</h2>
+    <p>Answer each one in your head before you open it.</p>
+    <details>
+      <summary>Why does defining <code>Effect.sync(() =&gt; console.log("hi"))</code> print nothing?</summary>
+      <div class="answer"><p>An Effect is a lazy description, a recipe. The function only runs when the Effect is <em>run</em>, and it runs again on every run.</p></div>
+    </details>
+    <details>
+      <summary>What are the three channels of <code>Effect&lt;A, E, R&gt;</code>, in order?</summary>
+      <div class="answer"><p>Success (<code>A</code>), error (<code>E</code>, the expected errors), and requirements (<code>R</code>, the services it needs). <code>E</code> and <code>R</code> default to <code>never</code>.</p></div>
+    </details>
+    <details>
+      <summary>What must be true of <code>R</code> before you can call <code>Effect.runPromise</code>?</summary>
+      <div class="answer"><p><code>R</code> must be <code>never</code>. You <strong>provide</strong> every required service first, then run at the edge.</p></div>
+    </details>
+  </section>
+
+  <h2>1. TypeScript describes your data, not your programs</h2>
+
+  <p>The official pitch fits in one sentence: “TypeScript is excellent at describing your data, but it says almost nothing about your programs: a function's signature doesn't tell you what can fail, what dependencies it needs, or whether it can be safely retried, timed out, or interrupted.”<sup class="cite"><a href="https://effect.website/docs/v4/onboarding">[1]</a></sup> The rest of this lesson tests that claim against four everyday pains. For each one, you get a preview of the Effect answer. The details come in later lessons.</p>
+
+  <h3>Pain 1: failures are invisible</h3>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript</p>
+<pre><code>// The signature says `number`. It lies.
+const divide = (a: number, b: number): number =&gt; {
+  if (b === 0) throw new Error("Cannot divide by zero")
+  return a / b
+}
+
+try {
+  divide(1, 0)
+} catch (e) {
+  // e is `unknown`. You had to *remember* to catch,
+  // and you have to guess what you caught.
+}</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect</p>
+<pre><code>class DivideByZero extends Data.TaggedError("DivideByZero")&lt;{}&gt; {}
+
+const divide = (a: number, b: number): Effect.Effect&lt;number, DivideByZero&gt; =&gt;
+  b === 0 ? Effect.fail(new DivideByZero()) : Effect.succeed(a / b)
+
+const safe = divide(1, 0).pipe(
+  Effect.catchTag("DivideByZero", () =&gt; Effect.succeed(Infinity))
+)  // Effect&lt;number, never, never&gt;: handled, and the type shows it</code></pre>
+    </div>
+  </div>
+
+  <p>The docs call this Effect's “major unique insight”: using the type system to track <strong>errors</strong> and <strong>context</strong>, not only success values.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/why-effect">[2]</a></sup> When you handle <code>DivideByZero</code>, it disappears from the error channel. If you forget, the compiler still shows it. Lesson 4 covers <a href="../04-error-handling/index.html">expected errors and defects</a>.</p>
+
+  <h3>Pain 2: dependencies are hidden</h3>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript (sketch)</p>
+<pre><code>import { db } from "./db"   // module-level singleton
+
+export async function getUser(id: string): Promise&lt;User&gt; {
+  return db.findUser(id)     // the signature never mentions db
+}
+
+// To test it: mock the module, or thread `db`
+// through every function by hand.</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect (sketch)</p>
+<pre><code>const getUser = (id: string) =&gt;
+  Effect.gen(function*() {
+    const db = yield* Database   // asking puts Database in R
+    return yield* db.findUser(id)
+  })  // Effect&lt;User, UserNotFound, Database&gt;
+
+// Tests provide a fake Database.
+// Forget to provide one and it won't compile.</code></pre>
+    </div>
+  </div>
+
+  <p>You saw a small version of this in lesson 1, where <code>Clock</code> sat in <code>R</code> until you provided it. Lesson 5 covers <a href="../05-dependency-injection/index.html">services and Layers</a>.</p>
+
+  <h2>2. Promises start eagerly and can't be stopped</h2>
+
+  <h3>Pain 3: no cancellation, no cleanup</h3>
+
+  <p>A Promise is already running when you get it, and the language gives you no way to stop it. The common “timeout” pattern, <code>Promise.race</code>, only stops <em>waiting</em>. The losing work keeps running.<sup class="cite"><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/race">[3]</a></sup> <code>Promise.all</code> is similar. It rejects as soon as one input rejects, but the others carry on, and it has no concurrency limit, because the work started before you called it.<sup class="cite"><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all">[4]</a></sup></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript</p>
+<pre><code>const timeout = (ms: number) =&gt;
+  new Promise&lt;never&gt;((_, reject) =&gt;
+    setTimeout(() =&gt; reject(new Error("timeout")), ms))
+
+const report = await Promise.race([
+  buildReport(),   // still running after the race is lost
+  timeout(100)
+]).catch(() =&gt; "fallback")</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect</p>
+<pre><code>const slowTask = Effect.gen(function*() {
+  yield* Effect.log("task started")
+  yield* Effect.sleep("2 seconds")
+  yield* Effect.log("task finished") // never printed
+  return "result"
+}).pipe(Effect.onInterrupt(() =&gt; Effect.log("cleanup ran")))
+
+const program = slowTask.pipe(
+  Effect.timeout("100 millis"),     // interrupts slowTask
+  Effect.catchTag("TimeoutError", () =&gt; Effect.succeed("fallback"))
+)
+await Effect.runPromise(program)    // "fallback", after ~100ms</code></pre>
+    </div>
+  </div>
+
+  <p>That Effect code was run against <code>effect@4.0.0</code> for this course.<sup class="cite"><a href="../../research/snippets/src/02-interruption-timeout.ts">[5]</a></sup> When the timeout fires, <code>slowTask</code> is <strong>interrupted</strong>: it stops, and its cleanup still runs. The same applies to <code>Effect.all</code>. You can cap it with <code>{ concurrency: n }</code>, and when one task fails, its siblings are interrupted. Lesson 6 covers <a href="../06-resources-and-concurrency/index.html">resources and concurrency</a>.</p>
+
+  <span class="sidenote">To be fair, plain TS can cancel some work with <a href="https://developer.mozilla.org/en-US/docs/Web/API/AbortController">AbortController</a>. You have to thread the signal through every call by hand, though, and nothing in the types reminds you to.</span>
+
+  <h3>Pain 4: hand-written retry loops</h3>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript</p>
+<pre><code>async function withRetry&lt;T&gt;(fn: () =&gt; Promise&lt;T&gt;, times: number) {
+  let last: unknown
+  for (let i = 0; i &lt;= times; i++) {
+    try { return await fn() } catch (e) { last = e }
+  }
+  throw last
+}
+// Backoff? Jitter? Only retry some errors? More code.</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect</p>
+<pre><code>callApi.pipe(Effect.retry({ times: 3 }))
+
+// Exponential backoff, at most 5 retries:
+callApi.pipe(Effect.retry(
+  Schedule.max([Schedule.exponential("10 millis"), Schedule.recurs(5)])
+))</code></pre>
+    </div>
+  </div>
+
+  <p>Retry works because an Effect is a recipe: you can cook it again. A Promise has already been cooked, which is why <code>withRetry</code> has to take a <em>function</em> that makes a fresh Promise. The docs put it this way: “Because programs are values, they compose: retries, timeouts, concurrency, resource handling, and tracing are operators you apply, not architectures you rebuild.”<sup class="cite"><a href="https://effect.website/docs/v4/onboarding">[1]</a></sup></p>
+
+  <h2>3. What it costs</h2>
+
+  <p>A fair verdict needs the other column too. These costs come from the project's own pages and from what this course's research ran into:</p>
+
+  <ul>
+    <li><strong>Learning curve.</strong> The API surface is large. The official Myths page admits it and suggests starting with “10–20 core functions”.<sup class="cite"><a href="https://effect.website/myths/">[6]</a></sup></li>
+    <li><strong>Bundle size.</strong> About 6–7 kB gzipped for a minimal program, about 15 kB with Schema.<sup class="cite"><a href="https://effect.website/blog/releases/effect/40">[7]</a></sup><sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md">[8]</a></sup> That is small, but not zero.</li>
+    <li><strong>Version churn.</strong> v4 renamed many v3 APIs, so older tutorials, Stack Overflow answers and LLM output are often wrong for v4. On the plus side, 4.x is a long-term-support release, supported until at least Sept 2029.<sup class="cite"><a href="https://effect.website/blog/releases/effect/40">[7]</a></sup></li>
+    <li><strong>Unstable edges.</strong> Core modules follow strict semver. HTTP, SQL, AI, CLI, RPC and similar modules are marked unstable and can break in minor releases.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md">[8]</a></sup></li>
+    <li><strong>Type-inference sharp edges.</strong> If the branches of a ternary return different Effects, TypeScript infers a union of Effect types, which breaks the next <code>.pipe(...)</code>. The fix is to annotate the return type, as <code>divide</code> does above.</li>
+    <li><strong>“Effect all the way down” (community opinion, not an official source).</strong> Effect code composes best with other Effect code, so it tends to spread through a codebase. The maintainers' own advice is to cross over at the edges with <code>runPromise</code> or <code>ManagedRuntime</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">[9]</a></sup> Lesson 8 tests this.</li>
+  </ul>
+
+  <p>What about speed? The Myths page says the “500x slower” claim “only applies when measuring trivial operations like 1 + 1”. Effect is “an app-level coordination library rather than a low-level operation wrapper.”<sup class="cite"><a href="https://effect.website/myths/">[6]</a></sup></p>
+
+  <div class="box v3">
+    <p class="box-title">Reading older tutorials? v3 vs v4</p>
+    <p>The official Myths page has not been updated for v4 yet. Its starter list still shows <code>Effect.catchAll</code> (now <code>Effect.catch</code>) and the <code>Either</code> module (now <code>Result</code>), and its ~25 kB bundle figure is from v3.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/error-handling.md">[10]</a></sup> Read it for the arguments, not the code.</p>
+  </div>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: your ledger, first draft</p>
+    <ul>
+      <li><strong>Pro:</strong> failures and dependencies appear in signatures, so the compiler tracks them for you (pains 1 and 2).</li>
+      <li><strong>Pro:</strong> timeout, retry, concurrency limits and cancellation are operators you add, not code you write (pains 3 and 4).</li>
+      <li><strong>Cost:</strong> a real learning curve, plus v3-era material that misleads you, for your whole team.</li>
+      <li><strong>Cost:</strong> about 6–7 kB of bundle, and unstable APIs outside the core.</li>
+      <li><strong>Open question:</strong> how far does Effect spread into a codebase? Keep an eye on this through lesson 8.</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up.</p>
+
+  <div class="quiz">
+    <p class="q">1. A function is typed <code>getUser(id: string): Promise&lt;User&gt;</code>. What does its signature tell you about failure?</p>
+    <ol>
+      <li><button class="option" data-correct>Nothing: it may throw anything, typed unknown</button><span data-why>Promise has no error type parameter, so a catch gives you unknown.</span></li>
+      <li><button class="option">It can only fail with an Error</button><span data-why>JavaScript lets you throw any value, and TypeScript doesn't track what a function throws.</span></li>
+      <li><button class="option">It never fails; Promises carry no errors</button><span data-why>Promises can reject. The type just doesn't say so.</span></li>
+      <li><button class="option">It rejects with null for bad ids</button><span data-why>Nothing in the signature says that. You'd have to read the body to find out.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. You write <code>Promise.race([buildReport(), timeout(100)])</code> and the timeout wins. What happens to <code>buildReport()</code>?</p>
+    <ol>
+      <li><button class="option" data-correct>It keeps running; nothing stopped the work</button><span data-why>Promise.race only stops waiting. The losing Promise carries on.</span></li>
+      <li><button class="option">It is cancelled automatically by the race</button><span data-why>Promises have no built-in cancellation, and race doesn't add any.</span></li>
+      <li><button class="option">It restarts from scratch at next await</button><span data-why>A Promise runs once. It never restarts.</span></li>
+      <li><button class="option">It throws a TimeoutError inside the fetch</button><span data-why>The timeout rejects its own Promise. Nothing is thrown into buildReport.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. <code>slowTask.pipe(Effect.timeout("100 millis"))</code>: what happens to <code>slowTask</code> when time runs out?</p>
+    <ol>
+      <li><button class="option" data-correct>It is interrupted, and its cleanup still runs</button><span data-why>Effect.timeout interrupts the work and fails with a TimeoutError. onInterrupt handlers run.</span></li>
+      <li><button class="option">It keeps running in the background until done</button><span data-why>That is the Promise.race behaviour. Effect interrupts the timed-out work.</span></li>
+      <li><button class="option">It finishes first, then the result is discarded</button><span data-why>It doesn't get to finish. It is stopped at the 100ms mark.</span></li>
+      <li><button class="option">It pauses, then resumes on the next run</button><span data-why>Interruption stops the work. A later run starts the recipe fresh.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. Which of these is a real cost of adopting Effect v4?</p>
+    <ol>
+      <li><button class="option" data-correct>v3 tutorials and LLM answers use renamed APIs</button><span data-why>v4 renamed many APIs, so older material is often wrong for v4.</span></li>
+      <li><button class="option">It adds roughly a megabyte to every bundle</button><span data-why>A minimal program is about 6–7 kB gzipped, and about 15 kB with Schema.</span></li>
+      <li><button class="option">It cannot be called from ordinary TypeScript code</button><span data-why>You call it from plain code at the edges with runPromise or ManagedRuntime.</span></li>
+      <li><button class="option">It replaces the TypeScript compiler with its own</button><span data-why>Effect is a library. It uses the normal TypeScript compiler (5.9+, with 7 recommended).</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: operators, not rewrites, about 5 minutes</p>
+    <p>Open <code>lessons/02-why-effect/exercise.ts</code>. It gives you a ready-made <em>flaky</em> effect, which fails twice and then succeeds, and a <em>slow</em> effect, which takes 2 seconds. You won't edit either one. You'll only add operators with <code>.pipe(...)</code>:</p>
+    <ol>
+      <li>Make the flaky effect reliable with <code>Effect.retry</code>.</li>
+      <li>Predict the error type that <code>Effect.timeout</code> adds, and check it with tsc.</li>
+      <li>Time out the slow effect, fall back to a cached value, and confirm that its cleanup ran.</li>
+    </ol>
+    <div class="cmd"><pre><code class="language-bash">node lessons/02-why-effect/exercise.ts</code></pre></div>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/02-why-effect</code></pre></div>
+    <p>Run both from the <code>effect-v4/</code> folder. Each check prints ✅, ⬜ (not done) or ❌ (wrong). The reference answers are in <code>solution.ts</code>.</p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 10 minutes)</p>
+    <p><a href="https://effect.website/docs/v4/onboarding">Effect docs: “Onboarding”</a> and <a href="https://effect.website/docs/v4/getting-started/why-effect">“Why Effect?”</a>. These are the project's own case, so read them critically and compare them with your ledger. Then skim the <a href="https://effect.website/myths/">Myths page</a> for the counter-arguments, keeping in mind that its code uses v3 names. Quick lookups: <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher</p>
+    <p>Not convinced? Good. Push back in this chat, for example “Couldn't I get typed errors with a Result type and neverthrow?” or “How bad is the spreading problem in practice?” Disagreeing with the pitch is part of building a fair verdict.</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../01-mental-model/index.html">← Lesson 1: The mental model</a>
+    <a class="next" href="../03-building-programs/index.html">Lesson 3: Building programs →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,245 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect Resources & Concurrency</title>
+  <meta name="description" content="Lesson 6 of the Effect v4 course: acquireRelease and Scope, bounded and structured concurrency, fibers, timeouts and retries with Schedule.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 6 of 8 · about 15 minutes</p>
+  <h1>Resources, concurrency, timeouts and retries</h1>
+  <p class="subtitle">The operational code you usually hand-write, available as operators.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Guarantee that a resource is released however the program ends. Run work with a concurrency limit. Put a timeout and a retry policy on any Effect without touching its code.</p>
+  </div>
+
+  <p>In <a href="../01-mental-model/index.html">lesson 1</a> you saw that an Effect is a recipe, so you can wrap it before it runs. This lesson pays that off. Cleanup, parallelism, timeouts and retries are the parts of a backend that tend to be fragile and hand-written, and here each one becomes a single function you apply. These are also the strongest arguments in Effect's favour, so this lesson matters for your verdict.</p>
+
+  <section class="recall">
+    <h2>Warm-up: recall from earlier lessons</h2>
+    <p>Answer each one out loud or on paper <em>before</em> you open it.</p>
+    <details>
+      <summary>What do the three channels in <code>Effect&lt;A, E, R&gt;</code> mean?</summary>
+      <div class="answer"><p><strong>A</strong> is the success value, <strong>E</strong> the expected errors, and <strong>R</strong> the services it needs before it can run. E and R default to <code>never</code>. (<a href="../01-mental-model/index.html">Lesson 1</a>)</p></div>
+    </details>
+    <details>
+      <summary>What is the difference between an expected error and a defect?</summary>
+      <div class="answer"><p>An <strong>expected error</strong> is tracked in <code>E</code> and you recover from it with <code>Effect.catchTag</code> and friends. A <strong>defect</strong> is a bug or unexpected throw. It is not in <code>E</code>, only in the <code>Cause</code>. (<a href="../04-error-handling/index.html">Lesson 4</a>)</p></div>
+    </details>
+    <details>
+      <summary>An Effect has <code>Database</code> in its R channel. How do you make it runnable?</summary>
+      <div class="answer"><p>You <strong>provide</strong> a Database, either with <code>Effect.provideService(Database, impl)</code> or with <code>Effect.provide(Database.layer)</code>. That removes it from <code>R</code>, and every runner needs <code>R = never</code>. (<a href="../05-dependency-injection/index.html">Lesson 5</a>)</p></div>
+    </details>
+  </section>
+
+  <h2>1. Resources that always get released</h2>
+
+  <p>A database connection, a file handle or a lock must be released on every path: success, failure, and <em>interruption</em>, which means being cancelled from outside. In plain TypeScript you reach for <code>try/finally</code>. That works until the resource outlives one function, or until the caller abandons the work, for example after a timeout. At that point nothing tells the <code>finally</code> to run early.</p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript: try/finally</p>
+<pre><code>const db = await openDb()
+try {
+  const cache = await openCache()
+  try {
+    await work(db, cache)
+  } finally {
+    await cache.close()   // you must nest by hand
+  }
+} finally {
+  await db.close()
+}
+// If a caller "times out" with Promise.race,
+// work() keeps running and nothing closes early.</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect: acquireRelease + scoped</p>
+<pre><code>const openDb = Effect.acquireRelease(
+  connect,                       // acquire
+  (db, exit) =&gt; db.close         // release: always runs
+)                                // Effect&lt;Db, never, Scope&gt;
+
+const program = Effect.gen(function*() {
+  const db = yield* openDb
+  const cache = yield* openCache
+  yield* work(db, cache)
+})
+
+Effect.scoped(program)  // closes cache, then db</code></pre>
+    </div>
+  </div>
+
+  <p><code>Effect.acquireRelease(acquire, release)</code> pairs the opening step with its cleanup, and puts a <code>Scope</code> into the requirements channel.<sup class="cite"><a href="https://effect.website/docs/v4/resource-management/scope">[1]</a></sup> A <strong>Scope</strong> is the lifetime of your resources, and each release step is a <strong>finalizer</strong> registered in it. <code>Effect.scoped(program)</code> provides a fresh Scope and closes it when <code>program</code> ends.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Effect.ts#L6475">[2]</a></sup> Closing the Scope runs the finalizers in <strong>reverse order</strong> of acquisition, whatever the exit. The release function also receives the <code>Exit</code>, so it can tell a clean finish from a failure.</p>
+
+  <span class="sidenote">The Scope in <code>R</code> is the same idea as <code>Database</code> in <code>R</code> from lesson 5. The type won't let you run the program until something has taken responsibility for cleanup.</span>
+
+  <p>You already have one Scope for free. Inside <code>Layer.effect</code>, the layer's own scope is used, so a connection acquired while building a layer lives exactly as long as the layer.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/ai-docs/src/01_effect/05_resources/10_acquire-release.ts">[3]</a></sup></p>
+
+  <h2>2. Concurrency with a limit, and with a safety net</h2>
+
+  <p><code>Effect.all</code> runs a list (or a struct) of effects. <code>Effect.forEach(items, f)</code> is the “map over a list” version. Both take a <code>concurrency</code> option, either a number or <code>"unbounded"</code>. The default surprises most newcomers: “By default, if you don't specify any concurrency option, effects will run sequentially.”<sup class="cite"><a href="https://effect.website/docs/v4/concurrency/basic-concurrency">[4]</a></sup></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript: Promise.all</p>
+<pre><code>// All 1,000 requests start at once: no limit.
+const users = await Promise.all(ids.map(fetchUser))
+
+// If one rejects, Promise.all rejects…
+// …but the other 999 requests keep running.</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect: forEach with concurrency</p>
+<pre><code>// At most 10 in flight. Results stay in input order.
+const users = yield* Effect.forEach(ids, fetchUser, {
+  concurrency: 10
+})
+
+// If one fails, the in-flight siblings are
+// interrupted and their finalizers run.</code></pre>
+    </div>
+  </div>
+
+  <p>The research for this course timed four 100ms tasks: about 400ms with the default, 200ms with <code>concurrency: 2</code>, and 100ms with <code>"unbounded"</code>. That second guarantee is called <strong>structured concurrency</strong>. When one concurrent task fails, its siblings are interrupted rather than left running in the background. <code>Effect.race</code> works the same way and interrupts the loser.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/CHANGELOG.md">[5]</a></sup> A rejected <code>Promise.all</code>, by contrast, does not stop the other promises.<sup class="cite"><a href="https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Promise/all">[6]</a></sup></p>
+
+  <h3>Fibers, in one paragraph</h3>
+
+  <p>Under the hood, each running effect is a <strong>fiber</strong>, a lightweight virtual thread managed by the Effect runtime.<sup class="cite"><a href="https://effect.website/docs/v4/concurrency/fibers">[7]</a></sup> <code>Effect.all</code> with concurrency creates fibers for you. You rarely need to touch them directly, but you can: <code>Effect.forkChild</code> starts one tied to the parent's lifetime, <code>Fiber.join</code> waits for its result, and <code>Fiber.interrupt</code> stops it.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/forking.md">[8]</a></sup></p>
+
+<pre><code>const program = Effect.gen(function*() {
+  const ticker = yield* Effect.forkChild(tickForever)  // runs in the background
+  const result = yield* Fiber.join(yield* Effect.forkChild(work))
+  yield* Fiber.interrupt(ticker)                        // ticker's finalizers run
+  return result
+})</code></pre>
+
+  <h2>3. Timeouts and retries are just operators</h2>
+
+  <p><code>Effect.timeout("2 seconds")</code> adds <code>Cause.TimeoutError</code> to the error channel and <em>interrupts</em> the work when time runs out. The work is actually stopped, not just ignored.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Effect.ts#L4563">[9]</a></sup> Because it is a tagged error, you recover with the <code>catchTag</code> you learned in lesson 4:</p>
+
+<pre><code>const price = fetchPrice.pipe(
+  Effect.timeout("2 seconds"),                        // Effect&lt;number, FetchError | TimeoutError&gt;
+  Effect.catchTag("TimeoutError", () =&gt; cachedPrice)  // Effect&lt;number, FetchError&gt;
+)</code></pre>
+
+  <p><code>Effect.retry</code> re-runs a failed effect according to a <strong>Schedule</strong>, a value that describes when to try again and when to give up.<sup class="cite"><a href="https://effect.website/docs/v4/error-management/retrying">[10]</a></sup> You build schedules from small pieces and combine them. <code>Schedule.max([a, b])</code> keeps going only while <em>both</em> keep going, and uses the longer delay.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/v3-to-v4.md">[11]</a></sup> That gives you the classic “back off exponentially, but at most N times” rule:</p>
+
+<pre><code>const policy = Schedule.max([
+  Schedule.exponential("10 millis"),  // wait 10ms, 20ms, 40ms …
+  Schedule.recurs(5)                  // … but stop after 5 retries
+])
+
+const robust = callApi.pipe(Effect.retry(policy))  // or Effect.retry({ times: 5 })</code></pre>
+
+  <p>Notice that <code>callApi</code> never changed. The same policy value can wrap every outbound call in your codebase, and a test can swap in a faster one.</p>
+
+  <div class="box v3">
+    <p class="box-title">Reading older tutorials? v3 vs v4</p>
+    <ul>
+      <li><code>Effect.fork</code> → <code>Effect.forkChild</code>, and <code>Effect.forkDaemon</code> → <code>Effect.forkDetach</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/forking.md">[8]</a></sup></li>
+      <li>Fibers are no longer Effects. Instead of <code>yield* fiber</code>, write <code>Fiber.join(fiber)</code>. <code>Ref</code> and <code>Deferred</code> changed the same way.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/yieldable.md">[12]</a></sup></li>
+      <li><code>Schedule.intersect</code> / <code>both</code> → <code>Schedule.max([…])</code>, <code>union</code> / <code>either</code> → <code>Schedule.min([…])</code>, and <code>andThen</code> → <code>Schedule.concat</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/v3-to-v4.md">[11]</a></sup></li>
+      <li><code>Layer.scoped</code> → <code>Layer.effect</code>, which now handles scoped resources itself.</li>
+      <li><code>Effect.timeoutFail</code> / <code>timeoutTo</code> → <code>Effect.timeoutOrElse</code>, and built-in <code>*Exception</code> errors are now <code>*Error</code> (<code>TimeoutError</code>).</li>
+    </ul>
+  </div>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: add to your ledger</p>
+    <ul>
+      <li><strong>Pro:</strong> cleanup is guaranteed on success, failure and interruption, and nesting more resources doesn't add more <code>try/finally</code> blocks.</li>
+      <li><strong>Pro:</strong> cancellation really stops work. Timeouts, races and failed siblings interrupt the fibers involved, which Promises cannot do.</li>
+      <li><strong>Pro:</strong> concurrency limits, retry and timeout policies are one-line values you can reuse and test, not loops you rewrite per call site.</li>
+      <li><strong>Cost:</strong> more concepts to learn: Scope, finalizers, fibers, Schedule. Interruption semantics take time to build intuition for.</li>
+      <li><strong>Cost:</strong> the sequential default is safe but easy to forget. Code that “looks parallel” may not be until you add <code>concurrency</code>.</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up.</p>
+
+  <div class="quiz">
+    <p class="q">1. A program opens <code>db</code>, then <code>cache</code>, both with <code>acquireRelease</code>, and then fails. It is run with <code>Effect.scoped</code>. What happens?</p>
+    <ol>
+      <li><button class="option" data-correct>Both close, the last one opened closes first</button><span data-why>Finalizers run on every exit, in reverse order of acquisition: cache, then db.</span></li>
+      <li><button class="option">Both close, the first one opened closes first</button><span data-why>Both close, but in reverse order, like nested try/finally blocks: the last one opened closes first.</span></li>
+      <li><button class="option">Neither closes, because the program failed before finishing</button><span data-why>Release runs on success, failure and interruption. That is the whole point of acquireRelease.</span></li>
+      <li><button class="option">Only the most recent resource is closed automatically</button><span data-why>Every finalizer registered in the Scope runs when the Scope closes.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. <code>Effect.all([a, b, c, d])</code> with no options. How do the four effects run?</p>
+    <ol>
+      <li><button class="option" data-correct>One after another, in order, by default</button><span data-why>Without a concurrency option, Effect.all is sequential. Add { concurrency: n } to overlap them.</span></li>
+      <li><button class="option">All at once, like Promise.all does today</button><span data-why>That is a common assumption, but it's wrong. Concurrency is opt-in with the concurrency option.</span></li>
+      <li><button class="option">Two at a time, the default limit</button><span data-why>There is no hidden limit. The default is fully sequential.</span></li>
+      <li><button class="option">In random order, picked by the runtime</button><span data-why>The order is deterministic: they run in sequence, and results come back in input order.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. <code>Effect.all([slow, failing], { concurrency: "unbounded" })</code>, where <code>failing</code> fails after 50ms and <code>slow</code> needs 1 second. What happens to <code>slow</code>?</p>
+    <ol>
+      <li><button class="option" data-correct>It is interrupted, and its finalizers still run</button><span data-why>That is structured concurrency: a failing sibling interrupts the others, and cleanup still runs.</span></li>
+      <li><button class="option">It keeps running in the background until done</button><span data-why>That is what Promise.all does. Effect interrupts the sibling instead.</span></li>
+      <li><button class="option">It finishes first, then the failure is reported</button><span data-why>The whole thing fails after about 50ms. It doesn't wait for slow.</span></li>
+      <li><button class="option">It is paused, then resumed on next run</button><span data-why>An interrupted fiber does not resume. Running the Effect again starts the recipe from scratch.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. When does <code>Effect.retry(Schedule.max([Schedule.exponential("10 millis"), Schedule.recurs(5)]))</code> stop retrying a call that keeps failing?</p>
+    <ol>
+      <li><button class="option" data-correct>After five retries, waiting longer before each one</button><span data-why>max continues only while both schedules continue. recurs(5) stops after 5 retries, and exponential makes each wait longer.</span></li>
+      <li><button class="option">Never; exponential backoff keeps retrying forever by itself</button><span data-why>On its own, yes. Combined with recurs(5) through max, it stops when recurs stops.</span></li>
+      <li><button class="option">After ten milliseconds, no matter how many retries</button><span data-why>"10 millis" is the first delay, not a total time budget.</span></li>
+      <li><button class="option">After five retries, each exactly ten millis apart</button><span data-why>Five retries is right, but exponential doubles the delay each time: 10, 20, 40 …</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: four small tasks, about 7 minutes</p>
+    <p>Open <code>lessons/06-resources-and-concurrency/exercise.ts</code>. Replace each <code>todo()</code> and <code>TODO</code>, then run the checks from the <code>effect-v4/</code> folder:</p>
+    <div class="cmd"><pre><code class="language-bash">node lessons/06-resources-and-concurrency/exercise.ts</code></pre></div>
+    <ol>
+      <li><strong>Resources:</strong> write <code>openResource</code> with <code>acquireRelease</code>, then make the half-failing program runnable. The check confirms the release order.</li>
+      <li><strong>Concurrency:</strong> run four jobs with at most two in flight. A counter checks the limit, so timing can't make this flaky.</li>
+      <li><strong>Retry:</strong> back off exponentially from 5ms, giving up after 3 retries.</li>
+      <li><strong>Timeout:</strong> predict the error type that <code>Effect.timeout</code> adds, then fall back to <code>"cached"</code>.</li>
+    </ol>
+    <p>Task 4's prediction is checked by the type checker:</p>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/06-resources-and-concurrency</code></pre></div>
+    <p>The reference answers are in <code>solution.ts</code>. The whole run takes well under a second.</p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 15 minutes)</p>
+    <p><a href="https://effect.website/docs/v4/resource-management/introduction">Effect docs: “Resource Management”</a> and <a href="https://effect.website/docs/v4/resource-management/scope">“Scope”</a>, then <a href="https://effect.website/docs/v4/concurrency/basic-concurrency">“Basic Concurrency”</a> and <a href="https://effect.website/docs/v4/scheduling/using-schedules">“Using Schedules”</a>. For runnable examples, see the official <a href="https://github.com/Effect-TS/effect/tree/67ba4e46a11ccda0b6761578bfd22c04ae00167d/ai-docs/src/06_schedule">ai-docs schedule files</a>. For a quick lookup later, use the <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher</p>
+    <p>Anything fuzzy? Ask in this chat, for example “What happens to finalizers if the process gets Ctrl-C?”, “When would I fork a fiber myself instead of using Effect.all?” or “How do I retry only some error tags?”</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../05-dependency-injection/index.html">← Lesson 5: Dependency injection</a>
+    <a class="next" href="../07-schema-and-toolbox/index.html">Lesson 7: Schema and the toolbox →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>

@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect v4 Cheat Sheet</title>
+  <meta name="description" content="The core Effect v4 API on one printable page, verified against effect@4.0.0.">
+  <link rel="stylesheet" href="../assets/course.css">
+  <style>
+    main { max-width: 60rem; }
+    .sheet { display: grid; grid-template-columns: 1fr; gap: 0 2rem; }
+    @media (min-width: 56rem) { .sheet { grid-template-columns: 1fr 1fr; } }
+    .sheet section { break-inside: avoid; min-width: 0; }
+    .sheet h2 { font-size: 1.15rem; margin-top: 1.6rem; }
+    .sheet pre { font-size: 0.74rem; }
+    .sheet td, .sheet th { font-size: 0.82rem; padding: 0.35rem 0.5rem; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="kicker"><a href="../index.html">Effect v4 course</a> · Reference · verified against <code>effect@4.0.0</code></p>
+  <h1>Effect v4 cheat sheet</h1>
+  <p class="subtitle">The core API on one page. Print it, or keep it open in a tab while you write code.</p>
+
+  <div class="sheet">
+
+  <section>
+    <h2>The type <small>(L1)</small></h2>
+<pre><code>Effect.Effect&lt;A, E = never, R = never&gt;
+//           success  error   requirements
+
+Effect.Success&lt;typeof e&gt;   // A
+Effect.Error&lt;typeof e&gt;     // E
+Effect.Services&lt;typeof e&gt;  // R   (v3: Effect.Context)</code></pre>
+    <p>An Effect is a lazy, immutable description. Nothing runs until you run it at the edge.</p>
+  </section>
+
+  <section>
+    <h2>Run at the edge <small>(L1)</small></h2>
+<pre><code>Effect.runSync(e)          // value, or throws
+Effect.runPromise(e)       // Promise; rejects with the raw error
+Effect.runSyncExit(e)      // Exit, never throws
+Effect.runPromiseExit(e)   // Promise&lt;Exit&gt;
+Effect.runFork(e)          // Fiber
+NodeRuntime.runMain(e)     // @effect/platform-node: signals, exit codes
+// every runner requires R = never</code></pre>
+  </section>
+
+  <section>
+    <h2>Create <small>(L3)</small></h2>
+    <div class="table-wrap"><table>
+      <tr><td><code>Effect.succeed(a)</code></td><td>a value you already have</td></tr>
+      <tr><td><code>Effect.fail(e)</code></td><td>an expected error</td></tr>
+      <tr><td><code>Effect.sync(() =&gt; …)</code></td><td>sync side effect that won't throw</td></tr>
+      <tr><td><code>Effect.try({ try, catch })</code></td><td>sync code that may throw</td></tr>
+      <tr><td><code>Effect.promise(() =&gt; p)</code></td><td>Promise that never rejects</td></tr>
+      <tr><td><code>Effect.tryPromise({ try, catch })</code></td><td>Promise that may reject</td></tr>
+      <tr><td><code>Effect.callback(resume =&gt; …)</code></td><td>callback API (v3: <code>async</code>)</td></tr>
+      <tr><td><code>Effect.fromNullishOr(x)</code></td><td>nullable value</td></tr>
+    </table></div>
+  </section>
+
+  <section>
+    <h2>Compose <small>(L3)</small></h2>
+<pre><code>Effect.gen(function*() {
+  const user = yield* findUser(id)        // like await
+  if (!user.ok) return yield* new NotFound({ id })
+  return user.name
+})
+
+const f = Effect.fn("f")(function*(x: number) { … },
+  Effect.catchTag("E", …))     // extra args = combinators
+
+e.pipe(
+  Effect.map((a) =&gt; …),        // pure transform
+  Effect.flatMap((a) =&gt; eff),  // next Effect
+  Effect.tap((a) =&gt; Effect.log(a)),  // must return an Effect (v4)
+  Effect.andThen((a) =&gt; eff)   // Effect or fn → Effect only (v4)
+)</code></pre>
+  </section>
+
+  <section>
+    <h2>Errors <small>(L4)</small></h2>
+<pre><code>class NotFound extends Data.TaggedError("NotFound")&lt;{
+  readonly id: number
+}&gt; {}
+
+e.pipe(Effect.catchTag("NotFound", (err) =&gt; …))   // removes it from E
+e.pipe(Effect.catchTag(["A", "B"], (err) =&gt; …))
+e.pipe(Effect.catchTags({ A: …, B: … }))
+e.pipe(Effect.catch((err) =&gt; …))        // v3: catchAll
+e.pipe(Effect.mapError((err) =&gt; …))
+e.pipe(Effect.orDie)                    // expected error → defect
+e.pipe(Effect.catchDefect((d) =&gt; …))    // boundary only
+e.pipe(Effect.catchCause((cause) =&gt; …))
+e.pipe(Effect.result)                   // Effect&lt;Result&lt;A, E&gt;&gt; (v3: either)</code></pre>
+    <p><strong>Expected error</strong>: typed and in <code>E</code>; recover from it. <strong>Defect</strong>: a bug, kept only in <code>Cause</code> (<code>cause.reasons</code>: <code>Fail | Die | Interrupt</code>).</p>
+  </section>
+
+  <section>
+    <h2>Services &amp; Layers <small>(L5)</small></h2>
+<pre><code>class Db extends Context.Service&lt;Db, {
+  readonly query: (sql: string) =&gt; Effect.Effect&lt;Rows&gt;
+}&gt;()("app/Db") {
+  static readonly layer = Layer.effect(Db, Effect.gen(function*() {
+    const config = yield* Config        // layer's own needs
+    return Db.of({ query: (sql) =&gt; … })
+  })).pipe(Layer.provide(Config.layer))
+}
+
+const program = Effect.gen(function*() {
+  const db = yield* Db                  // R = Db
+  return yield* db.query("select 1")
+})
+program.pipe(Effect.provide(Db.layer))   // R = never
+program.pipe(Effect.provideService(Db, fakeDb))</code></pre>
+    <div class="table-wrap"><table>
+      <tr><td><code>Layer.succeed(Tag, impl)</code></td><td>layer from a value</td></tr>
+      <tr><td><code>Layer.effect(Tag, eff)</code></td><td>from an Effect (scoped resources too)</td></tr>
+      <tr><td><code>Layer.provide(dep)</code></td><td>feed <code>dep</code> in, hide it</td></tr>
+      <tr><td><code>Layer.provideMerge(dep)</code></td><td>feed <code>dep</code> in, keep it in the output</td></tr>
+      <tr><td><code>Layer.merge(a, b)</code></td><td>side by side</td></tr>
+    </table></div>
+    <p>Conventions: <code>X.layer</code>, <code>X.layerTest</code>. Service methods should have <code>R = never</code>.</p>
+  </section>
+
+  <section>
+    <h2>Resources <small>(L6)</small></h2>
+<pre><code>const file = Effect.acquireRelease(
+  open("a.txt"),
+  (handle, exit) =&gt; close(handle)       // always runs
+)                                        // R includes Scope
+Effect.scoped(program)                   // closes the scope at the end
+// finalizers run in reverse order on success, failure or interruption</code></pre>
+  </section>
+
+  <section>
+    <h2>Concurrency <small>(L6)</small></h2>
+<pre><code>Effect.all([a, b, c])                          // sequential by default!
+Effect.all([a, b, c], { concurrency: 2 })
+Effect.forEach(ids, fetch, { concurrency: "unbounded" })
+Effect.race(a, b)                              // loser is interrupted
+
+const fiber = yield* Effect.forkChild(task)     // v3: fork
+const value = yield* Fiber.join(fiber)          // fibers aren't Effects in v4
+yield* Fiber.interrupt(fiber)</code></pre>
+  </section>
+
+  <section>
+    <h2>Timeouts &amp; retries <small>(L6)</small></h2>
+<pre><code>e.pipe(Effect.timeout("1 second"))      // E | Cause.TimeoutError
+  .pipe(Effect.catchTag("TimeoutError", () =&gt; fallback))
+
+e.pipe(Effect.retry({ times: 3 }))
+e.pipe(Effect.retry(Schedule.max([           // all must continue
+  Schedule.exponential("100 millis"),
+  Schedule.recurs(5)
+])))
+// Schedule.min([...]) = any continues;  Schedule.concat = one then the other</code></pre>
+  </section>
+
+  <section>
+    <h2>Schema <small>(L7)</small></h2>
+<pre><code>import { Schema } from "effect"
+
+const User = Schema.Struct({
+  id: Schema.Int,
+  name: Schema.String.check(Schema.isMinLength(1)),
+  role: Schema.Literals(["admin", "member"]),
+  nickname: Schema.optional(Schema.String)
+})
+type User = typeof User.Type
+
+Schema.decodeUnknownSync(User)(input)     // throws
+Schema.decodeUnknownEffect(User)(input)   // fails with SchemaError
+Schema.decodeUnknownSync(Schema.fromJsonString(User))(json)</code></pre>
+  </section>
+
+  <section>
+    <h2>Config &amp; logs <small>(L7)</small></h2>
+<pre><code>const port = yield* Config.Int("PORT").pipe(Config.withDefault(3000))
+const key  = yield* Config.Redacted("API_KEY")   // prints &lt;redacted&gt;
+// tests: Effect.provide(ConfigProvider.layer(ConfigProvider.fromUnknown({ PORT: 8080 })))
+
+yield* Effect.log("hello")       // also logInfo, logWarning, logError, logDebug
+Effect.withSpan("name")          // tracing span; Effect.fn("name") adds one</code></pre>
+  </section>
+
+  <section>
+    <h2>Embed in existing code <small>(L8)</small></h2>
+<pre><code>// a plain async function / route handler
+async function handler(req) {
+  return Effect.runPromise(program.pipe(Effect.provide(AppLayer)))
+}
+// share services across many handlers: ManagedRuntime.make(AppLayer)</code></pre>
+  </section>
+
+  </div>
+
+  <p style="margin-top:2rem">Sources: <a href="https://effect.website/docs/v4">effect.website/docs/v4</a>, <a href="https://github.com/Effect-TS/effect/blob/main/LLMS.md">LLMS.md</a>, <a href="https://github.com/Effect-TS/effect/blob/main/MIGRATION.md">MIGRATION.md</a>; full citations in <a href="../research/effect-v4.md">research/effect-v4.md</a>. Old names: <a href="v3-to-v4.html">Spotting v3 code</a>.</p>
+
+  <nav class="course-nav">
+    <a href="../index.html">← Course home</a>
+    <a class="next" href="v3-to-v4.html">Spotting v3 code →</a>
+  </nav>
+</main>
+<script src="../assets/course.js"></script>
+</body>
+</html>

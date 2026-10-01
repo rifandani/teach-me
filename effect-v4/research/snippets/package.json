@@ -1,0 +1,22 @@
+{
+  "name": "effect-v4-research-snippets",
+  "private": true,
+  "type": "module",
+  "description": "Runnable snippets verified against effect@4.0.0 (2026-10-01). Run any file with `node src/<file>.ts` (Node >= 22.18) or `npx tsx src/<file>.ts`.",
+  "scripts": {
+    "typecheck": "tsc -p .",
+    "test": "vitest run",
+    "run-all": "for f in src/0*.ts; do case $f in *.test.ts) continue;; esac; echo \"== $f\"; node $f || exit 1; done"
+  },
+  "dependencies": {
+    "@effect/platform-node": "4.0.0",
+    "effect": "4.0.0"
+  },
+  "devDependencies": {
+    "@effect/vitest": "4.0.0",
+    "@types/node": "26.6.3",
+    "tsx": "4.23.15",
+    "typescript": "7.0.2",
+    "vitest": "5.0.3"
+  }
+}

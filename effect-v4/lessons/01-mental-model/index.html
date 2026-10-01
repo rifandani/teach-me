@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect Mental Model</title>
+  <meta name="description" content="Lesson 1 of the Effect v4 course: an Effect is a lazy description of a program, Effect<A, E, R>.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 1 of 8 · about 12 minutes</p>
+  <h1>An Effect is a recipe, not a running task</h1>
+  <p class="subtitle">The one idea everything else in Effect is built on.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Read any <code>Effect&lt;A, E, R&gt;</code> type and say what it succeeds with, how it can fail, and what it needs. Explain why nothing happens until you <em>run</em> it.</p>
+  </div>
+
+  <p>You are here to decide whether Effect is worth adopting. To judge that fairly, you first need to know what an Effect actually <em>is</em>. Typed errors, dependency injection, retries and cancellation all come from the one idea in this lesson. If this idea clicks, the rest of the course is mostly vocabulary.</p>
+
+  <h2>1. A Promise is already running</h2>
+
+  <p>In plain TypeScript, a <code>Promise</code> starts working the moment you create it. It represents a task that is <em>already in flight</em>. An Effect is the opposite. The docs describe it as “a description of a workflow or operation that is <strong>lazily</strong> executed … when you create an Effect, it doesn't run immediately”.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/the-effect-type">[1]</a></sup></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript: eager</p>
+<pre><code>const promise = new Promise&lt;number&gt;((resolve) =&gt; {
+  console.log("runs immediately")
+  resolve(1)
+})
+// "runs immediately" is already printed.
+// You can't run it again, and you can't stop it.</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect: lazy</p>
+<pre><code>const effect = Effect.sync(() =&gt; {
+  console.log("runs only when run")
+  return 1
+})
+// Nothing printed yet. It is a value.
+
+Effect.runSync(effect) // prints, returns 1
+Effect.runSync(effect) // prints again: a reusable recipe</code></pre>
+    </div>
+  </div>
+
+  <p>Think of the difference between a <strong>recipe</strong> and a <strong>meal on the stove</strong>. A Promise is the meal: it is cooking right now. An Effect is the recipe. Writing it down cooks nothing. You can hand it to someone else, add a step (“if it burns, try once more”), or cook it twice. Effects are immutable values that “do not perform any actions themselves”; the Effect <em>runtime</em> executes them.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/the-effect-type">[1]</a></sup></p>
+
+  <span class="sidenote">This is why Effect can offer retry and timeout as plain functions. You can only retry something you still have the recipe for, and a Promise has already used its recipe up.</span>
+
+  <h2>2. The type tells the whole story: <code>Effect&lt;A, E, R&gt;</code></h2>
+
+  <p>An Effect's type has three parameters, called <strong>channels</strong>.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/the-effect-type">[1]</a></sup></p>
+
+  <div class="anatomy">
+    <div>
+      <div class="slot">A</div>
+      <div class="name">Success channel</div>
+      <div class="desc">The value it produces if it succeeds.</div>
+    </div>
+    <div>
+      <div class="slot">E</div>
+      <div class="name">Error channel</div>
+      <div class="desc">The <em>expected errors</em> it can fail with. <code>never</code> means it can't fail.</div>
+    </div>
+    <div>
+      <div class="slot">R</div>
+      <div class="name">Requirements channel</div>
+      <div class="desc">The <em>services</em> it needs before it can run. <code>never</code> means it needs nothing.</div>
+    </div>
+  </div>
+
+  <p><code>E</code> and <code>R</code> both default to <code>never</code>. In the source, the declaration is <code>interface Effect&lt;out A, out E = never, out R = never&gt;</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Effect.ts#L116">[2]</a></sup> So <code>Effect.Effect&lt;number&gt;</code> reads as “produces a number, can't fail, needs nothing.” Here is how the channels fill in as you build things up:</p>
+
+<pre><code>const one  = Effect.succeed(1)    // Effect&lt;number, never, never&gt;
+const oops = Effect.fail("boom")  // Effect&lt;never, string, never&gt;
+
+const time = Effect.gen(function*() {   // Effect&lt;number, never, Clock&gt;
+  const clock = yield* Clock            // ← asking for a service puts Clock in R
+  return yield* clock.now
+})</code></pre>
+
+  <p>Compare that with a plain function <code>getTime(): Promise&lt;number&gt;</code>. Its signature hides two things: whether it can throw, and that it secretly reads a global clock. The Effect version puts both into the type.</p>
+
+  <p>The docs offer a rough mental picture: an Effect is like a function <code>(context: Context&lt;R&gt;) =&gt; E | A</code>. You give it the services it needs, and you get back either an error or a value. The docs then add, “However, effects are not actually functions.”<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/the-effect-type">[1]</a></sup> Use the picture to build intuition, not as a definition.</p>
+
+  <h2>3. Run it once, at the edge</h2>
+
+  <p>A recipe does nothing until someone cooks it. In Effect, you do that with one of the <code>run*</code> functions.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/running-effects">[3]</a></sup> Ideally you call one only once, at your program's entry point: in <code>main</code>, an HTTP handler, or a test. Everything inside stays a description. This course calls that <strong>running at the edge</strong>.</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Function</th><th>Gives you</th><th>On failure</th></tr></thead>
+    <tbody>
+      <tr><td><code>Effect.runSync(e)</code></td><td>the value, synchronously</td><td>throws (and throws if <code>e</code> is async)</td></tr>
+      <tr><td><code>Effect.runPromise(e)</code></td><td>a <code>Promise</code> of the value</td><td>rejects with the error</td></tr>
+      <tr><td><code>Effect.runSyncExit(e)</code> / <code>runPromiseExit</code></td><td>an <code>Exit</code>: success or failure as data</td><td>never throws</td></tr>
+      <tr><td><code>NodeRuntime.runMain(e)</code></td><td>a real Node app's entry point</td><td>logs, sets exit code, handles Ctrl-C</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p><strong>Every runner requires <code>R = never</code>.</strong> Try to run <code>time</code> from above and you get a compile error, because nobody has supplied a <code>Clock</code> yet. You fix that by <strong>providing</strong> one, which removes it from <code>R</code>:</p>
+
+<pre><code>// Effect.runSync(time)   ← type error: Clock is still required
+
+const runnable = time.pipe(
+  Effect.provideService(Clock, { now: Effect.succeed(42) })
+)                                  // Effect&lt;number, never, never&gt;
+
+Effect.runSync(runnable)           // 42</code></pre>
+
+  <p>That snippet is dependency injection checked by the compiler, in a few lines. Lesson 5 covers it properly. For now, just notice that the type would not let you forget to supply the dependency.</p>
+
+  <div class="box v3">
+    <p class="box-title">Reading older tutorials? v3 vs v4</p>
+    <p>In v3, <code>runPromise</code> rejected with a <code>FiberFailure</code> wrapper. In v4 it rejects with your raw error.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/v3-to-v4.md">[4]</a></sup> The type helper <code>Effect.Effect.Context&lt;T&gt;</code> is now <code>Effect.Services&lt;T&gt;</code>. The mental model itself has not changed.</p>
+  </div>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: add to your ledger</p>
+    <ul>
+      <li><strong>Pro:</strong> a signature tells the truth. You can see what a function returns, how it fails and what it depends on without reading its body.</li>
+      <li><strong>Pro:</strong> because programs are values, you can wrap them (retry, timeout, provide a test double) without changing them.</li>
+      <li><strong>Cost:</strong> your code now has two worlds, Effect values and ordinary values, and you cross between them with <code>run*</code> at the edges. Keep this cost in mind; lesson 8 comes back to it.</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up. Effortful recall is what makes this stick.</p>
+
+  <div class="quiz">
+    <p class="q">1. <code>const e = Effect.sync(() =&gt; console.log("hi"))</code>. When is “hi” printed?</p>
+    <ol>
+      <li><button class="option" data-correct>Each time the effect is run</button><span data-why>Effect.sync stores the function. Every run calls it again.</span></li>
+      <li><button class="option">Once, at the moment of definition</button><span data-why>That is what a Promise does. An Effect is lazy, so defining it runs nothing.</span></li>
+      <li><button class="option">Once, the first time it's awaited</button><span data-why>You can't await an Effect directly, and it isn't cached. Each run calls the function again.</span></li>
+      <li><button class="option">Never; sync effects print nothing ever</button><span data-why>Sync effects run fine when you run them, for example with Effect.runSync.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. What does <code>Effect.Effect&lt;User, NotFound, Database&gt;</code> tell you?</p>
+    <ol>
+      <li><button class="option" data-correct>Gives a User, may fail NotFound, needs Database</button><span data-why>The channels are always in this order: A (success), E (error), R (requirements).</span></li>
+      <li><button class="option">Gives a Database, may fail NotFound, needs User</button><span data-why>That reads the channels backwards. A comes first: User is the success value.</span></li>
+      <li><button class="option">Gives a User, never fails, needs NotFound, Database</button><span data-why>The second slot is E, the error channel. R is only the third slot.</span></li>
+      <li><button class="option">Gives NotFound, may fail User, needs a Database</button><span data-why>The first slot is the success value, so this has A and E swapped.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. <code>time</code> has type <code>Effect&lt;number, never, Clock&gt;</code>. Why does <code>Effect.runSync(time)</code> fail to compile?</p>
+    <ol>
+      <li><button class="option" data-correct>Its requirement Clock has not been provided yet</button><span data-why>Every runner needs R = never. Provide a Clock first.</span></li>
+      <li><button class="option">runSync only accepts effects that can never fail</button><span data-why>runSync accepts failing effects; it throws the error when they fail. The problem here is R.</span></li>
+      <li><button class="option">Clock effects are async, so runSync rejects them</button><span data-why>Running an async effect with runSync fails at runtime, not at compile time. The compile error is about R.</span></li>
+      <li><button class="option">Generator effects must use runPromise instead of runSync</button><span data-why>Effect.gen builds an ordinary Effect, and any runner works on it once R is never.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. In a well-structured Effect app, where does <code>runPromise</code> (or <code>runMain</code>) usually appear?</p>
+    <ol>
+      <li><button class="option" data-correct>Once, at the program's entry point (the edge)</button><span data-why>Everything inside stays a composable description, and the run happens at the boundary.</span></li>
+      <li><button class="option">Inside every function that returns an Effect value</button><span data-why>That runs effects too early and throws away the benefits: you can no longer retry, time out or provide them.</span></li>
+      <li><button class="option">After each yield*, to get the real value</button><span data-why>Inside Effect.gen, yield* already gives you the value. No run is needed.</span></li>
+      <li><button class="option">Only in tests; production code never runs effects</button><span data-why>Production code runs effects too, once, at its entry point.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: four small tasks, about 5 minutes</p>
+    <p>Open <code>lessons/01-mental-model/exercise.ts</code> in your editor. Replace each <code>todo()</code> and <code>TODO</code>, then run the checks from the <code>effect-v4/</code> folder. Each check prints ✅, ⬜ (not done) or ❌ (wrong).</p>
+    <div class="cmd"><pre><code class="language-bash">node lessons/01-mental-model/exercise.ts</code></pre></div>
+    <p>Task 3 is checked by the type checker instead. Write down your prediction <em>before</em> you hover over anything in your editor, then run:</p>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/01-mental-model</code></pre></div>
+    <p>First time? Run <code>npm install</code> in <code>effect-v4/</code> once. You need Node 22.18+, which runs <code>.ts</code> files directly. The reference answers are in <code>solution.ts</code>; try not to peek until you're done.</p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 10 minutes)</p>
+    <p><a href="https://effect.website/docs/v4/getting-started/the-effect-type">Effect docs: “The Effect Type”</a>, then <a href="https://effect.website/docs/v4/getting-started/running-effects">“Running Effects”</a>. These are the official v4 pages this lesson is built on. For a quick lookup later, use the <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher</p>
+    <p>Anything fuzzy? Ask in this chat, for example “Why can't Effect just use Promises under the hood?” or “What exactly is the runtime?” Questions you get wrong in the quiz are the best ones to bring.</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../../index.html">← Course home</a>
+    <a class="next" href="../02-why-effect/index.html">Lesson 2: Why not plain TypeScript? →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>

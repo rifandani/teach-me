@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Building Effect Programs</title>
+  <meta name="description" content="Lesson 3 of the Effect v4 course: constructors, Effect.gen, pipe, and Effect.fn.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 3 of 8 · about 14 minutes</p>
+  <h1>Building programs: gen, pipe and fn</h1>
+  <p class="subtitle">Wrap the code you already have, then sequence it like async/await.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Turn plain TypeScript, including throwing code, Promises and <code>async</code> functions, into Effects. Then chain them with <code>Effect.gen</code>, <code>pipe</code> and <code>Effect.fn</code>.</p>
+  </div>
+
+  <section class="recall">
+    <h2>Warm-up: recall before you read</h2>
+    <p>Answer each one in your head first, then open it to check.</p>
+    <details>
+      <summary>What are the three channels of <code>Effect&lt;A, E, R&gt;</code>, and what does <code>never</code> in the <code>E</code> slot mean?</summary>
+      <div class="answer"><p>Success (A), error (E) and requirements (R). <code>E = never</code> means the Effect cannot fail with an expected error. (<a href="../01-mental-model/index.html">Lesson 1</a>)</p></div>
+    </details>
+    <details>
+      <summary>Why does <code>Effect.sync(() =&gt; console.log("hi"))</code> print nothing when you define it?</summary>
+      <div class="answer"><p>An Effect is a lazy description, a recipe. The function only runs when the Effect is run, and it runs again on every run. (<a href="../01-mental-model/index.html">Lesson 1</a>)</p></div>
+    </details>
+    <details>
+      <summary>Name one thing an Effect can do that a Promise can't.</summary>
+      <div class="answer"><p>It can be interrupted. For example, <code>Effect.timeout</code> actually stops the work and runs its cleanup, whereas a Promise keeps running. It can also be re-run or retried, because it is still a recipe. (<a href="../02-why-effect/index.html">Lesson 2</a>)</p></div>
+    </details>
+  </section>
+
+  <p>Adopting Effect never starts from a blank page. You have JSON parsing, fetch calls and <code>async</code> functions already. This lesson covers the small toolkit for wrapping that code and gluing the pieces together. It is most of what day-to-day Effect code looks like.</p>
+
+  <h2>1. Wrap existing code: pick a constructor</h2>
+
+  <p>Every Effect starts from a <em>constructor</em>. Choose one by answering two questions: is the code sync or async, and can it fail?<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/creating-effects">[1]</a></sup></p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>You have…</th><th>Use</th><th>Resulting type</th></tr></thead>
+    <tbody>
+      <tr><td>a value already</td><td><code>Effect.succeed(a)</code></td><td><code>Effect&lt;A&gt;</code></td></tr>
+      <tr><td>an expected failure</td><td><code>Effect.fail(e)</code></td><td><code>Effect&lt;never, E&gt;</code></td></tr>
+      <tr><td>sync code that <strong>won't</strong> throw</td><td><code>Effect.sync(() =&gt; …)</code></td><td><code>Effect&lt;A&gt;</code></td></tr>
+      <tr><td>sync code that <strong>may</strong> throw</td><td><code>Effect.try({ try, catch })</code></td><td><code>Effect&lt;A, E&gt;</code></td></tr>
+      <tr><td>a Promise that <strong>may</strong> reject</td><td><code>Effect.tryPromise({ try, catch })</code><sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Effect.ts#L966">[2]</a></sup></td><td><code>Effect&lt;A, E&gt;</code></td></tr>
+      <tr><td>a Promise that <strong>never</strong> rejects</td><td><code>Effect.promise(() =&gt; p)</code></td><td><code>Effect&lt;A&gt;</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The <code>catch</code> function is where an untyped <code>unknown</code> exception becomes a typed error that you name:</p>
+
+<pre><code>class ParseError extends Data.TaggedError("ParseError")&lt;{ readonly cause: unknown }&gt; {}
+
+const parse = (input: string) =&gt;
+  Effect.try({
+    try: () =&gt; JSON.parse(input) as unknown,
+    catch: (cause) =&gt; new ParseError({ cause })
+  })                                       // Effect&lt;unknown, ParseError&gt;</code></pre>
+
+  <span class="sidenote">If code inside <code>Effect.sync</code> throws anyway, the error is not lost. It becomes a <em>defect</em>, an unexpected error that is kept out of <code>E</code>. Lesson 4 covers defects.</span>
+
+  <p>Remember that constructors are lazy too. <code>Effect.tryPromise</code> takes a <em>function</em> returning a Promise, not the Promise itself. That lets the Effect start the work each time it runs, instead of once when you define it.</p>
+
+  <h2>2. <code>Effect.gen</code>: async/await for Effects</h2>
+
+  <p>Once you have a few Effects, you sequence them. The most readable way is a generator. <code>yield*</code> plays the role of <code>await</code>: it runs an Effect and gives you its success value.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/using-generators">[3]</a></sup></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript: async/await</p>
+<pre><code>async function greetUser(id: number) {
+  const profile = await fetchProfile(id)
+  if (profile.banned) {
+    throw new Error("banned")   // invisible in the type
+  }
+  return `Hello, ${profile.name}!`
+}
+// Promise&lt;string&gt;: what can fail? unknown</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect: Effect.gen + yield*</p>
+<pre><code>const greetUser = (id: number) =&gt;
+  Effect.gen(function*() {
+    const profile = yield* loadProfile(id)
+    if (profile.banned) {
+      return yield* new Banned({ id })   // fail
+    }
+    return `Hello, ${profile.name}!`
+  })
+// Effect&lt;string, FetchError | Banned, never&gt;</code></pre>
+    </div>
+  </div>
+
+  <p>The shape of the code is the same, but the type is honest. Both the <code>FetchError</code> from <code>loadProfile</code> and the new <code>Banned</code> error show up in <code>E</code> automatically.</p>
+
+  <p>To fail inside a generator, <code>yield*</code> a tagged error. Write it as <strong><code>return yield* new MyError(…)</code></strong>. The maintainers' style guide asks for the <code>return</code> “to ensure typescript understands that the function will not continue executing”.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">[5]</a></sup></p>
+
+  <h2>3. Pipelines: <code>map</code>, <code>flatMap</code>, <code>tap</code>, <code>andThen</code></h2>
+
+  <p>The other style is a pipeline. Every Effect has a <code>.pipe(…)</code> method, and there is a standalone <code>pipe(value, f, g)</code> as well. Each step takes the previous Effect and returns a new one.<sup class="cite"><a href="https://effect.website/docs/v4/getting-started/building-pipelines">[4]</a></sup></p>
+
+<pre><code>const half = (n: number) =&gt;
+  n % 2 === 0 ? Effect.succeed(n / 2) : Effect.fail(`odd: ${n}`)
+
+const program = Effect.succeed(10).pipe(
+  Effect.map((n) =&gt; n * 2),                     // plain function: 10 → 20
+  Effect.flatMap(half),                         // function returning an Effect: 20 → 10
+  Effect.tap((n) =&gt; Effect.log(`got ${n}`)),    // side effect, keeps the value
+  Effect.andThen((n) =&gt; Effect.succeed(n + 1))  // run the next Effect: 10 → 11
+)                                               // Effect&lt;number, string, never&gt;</code></pre>
+
+  <p>The rule of thumb: use <code>map</code> when your function returns a plain value, and <code>flatMap</code> when it returns another Effect. <code>tap</code> runs an Effect for its side effect, such as logging, and passes the original value through.</p>
+
+  <div class="box v3">
+    <p class="box-title">v3 gotcha: andThen and tap are stricter in v4</p>
+    <p>In v3, <code>Effect.andThen</code> and <code>Effect.tap</code> also accepted plain values, plain-returning functions and Promises. In v4 they accept <strong>only an Effect, or a function returning an Effect</strong>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Effect.ts#L2138">[6]</a></sup> So <code>Effect.andThen((n) =&gt; n + 1)</code> is a type error, and <code>Effect.tap((n) =&gt; console.log(n))</code> is a type error that also crashes at runtime with “Not a valid effect”. Use <code>Effect.map</code> for pure transforms and <code>Effect.tap((n) =&gt; Effect.log(n))</code> for logging. The migration guide does not call this change out, so expect older tutorials and LLM answers to get it wrong.</p>
+  </div>
+
+  <h2>4. <code>Effect.fn</code>: reusable functions</h2>
+
+  <p>A function whose body is a generator is so common that Effect has a constructor for it. <code>Effect.fn("name")</code> also gives each call a named tracing span, which you'll see in lesson 7.</p>
+
+<pre><code>const withdraw = Effect.fn("withdraw")(function*(balance: number, amount: number) {
+  if (amount &lt;= 0 || amount &gt; balance) {
+    return yield* new InvalidAmount({ amount })
+  }
+  return balance - amount
+})                       // (balance, amount) =&gt; Effect&lt;number, InvalidAmount, never&gt;
+
+const withdrawOrZero = Effect.fn("withdrawOrZero")(
+  function*(balance: number, amount: number) { return yield* withdraw(balance, amount) },
+  Effect.catchTag("InvalidAmount", () =&gt; Effect.succeed(0))   // extra args = pipeline steps
+)</code></pre>
+
+  <p>The maintainers' style guide (<code>LLMS.md</code>) gives three rules:<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">[5]</a></sup></p>
+  <ul>
+    <li>“Prefer <code>Effect.gen</code> for inline Effect code. For reusable functions, prefer <code>Effect.fn("name")</code> when tracing is useful and <code>Effect.fnUntraced</code> when it is not.”</li>
+    <li>“Avoid functions that only wrap and return <code>Effect.gen</code>.”</li>
+    <li>“<strong>Do not</strong> use .pipe with Effect.fn.” Pass extra steps such as <code>catchTag</code> as extra arguments instead, as shown above.</li>
+  </ul>
+
+  <div class="box tip">
+    <p class="box-title">Sharp edge: ternaries that return different Effects</p>
+    <p>A function like <code>(id) =&gt; id === 1 ? Effect.succeed(user) : Effect.fail(new NotFound())</code> infers a <em>union of two Effect types</em> rather than one <code>Effect&lt;User, NotFound&gt;</code>. That can break the next <code>.pipe(Effect.catchTag(…))</code>. The fix is to annotate the return type, <code>(id): Effect.Effect&lt;User, NotFound&gt; =&gt; …</code>, or to write the body with <code>Effect.gen</code>.</p>
+  </div>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: add to your ledger</p>
+    <ul>
+      <li><strong>Pro:</strong> you can adopt incrementally. Wrapping an existing Promise or throwing function is one constructor, so you don't have to rewrite your libraries.</li>
+      <li><strong>Pro:</strong> <code>Effect.gen</code> reads almost like async/await, so a reviewer who doesn't know Effect can still follow the logic.</li>
+      <li><strong>Cost:</strong> there are two styles (generators and pipelines) and several look-alike combinators. A team needs a shared convention, and the maintainers' <code>LLMS.md</code> is a good starting point.</li>
+      <li><strong>Cost:</strong> API churn between majors, such as <code>andThen</code>/<code>tap</code>, means older tutorials and LLM output need checking against v4.</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up.</p>
+
+  <div class="quiz">
+    <p class="q">1. Your code calls <code>JSON.parse</code>, which throws on bad input. Which constructor fits?</p>
+    <ol>
+      <li><button class="option" data-correct>Effect.try with a catch mapping</button><span data-why>Effect.try is for sync code that may throw, and catch turns the exception into a typed error.</span></li>
+      <li><button class="option">Effect.sync with no extra options</button><span data-why>Effect.sync assumes the code won't throw. If it does, you get a defect, not a typed error.</span></li>
+      <li><button class="option">Effect.promise wrapping the parse call</button><span data-why>JSON.parse is synchronous, and Effect.promise is for Promises that never reject.</span></li>
+      <li><button class="option">Effect.succeed with the parsed value</button><span data-why>The argument is evaluated immediately, so the throw happens before any Effect exists.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. Inside <code>Effect.gen</code>, what does <code>const user = yield* findUser(1)</code> do?</p>
+    <ol>
+      <li><button class="option" data-correct>Runs findUser and gives its success value</button><span data-why>yield* works like await. If findUser fails, the generator stops and its error moves into E.</span></li>
+      <li><button class="option">Returns the findUser Effect itself, still unrun</button><span data-why>That is what you'd get without yield*. With yield* you get the unwrapped value.</span></li>
+      <li><button class="option">Starts findUser in the background, without waiting</button><span data-why>Running work in the background is forking, covered in lesson 6. yield* waits for the result.</span></li>
+      <li><button class="option">Converts findUser into a Promise you await</button><span data-why>No Promise is involved. yield* sequences Effects directly.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. In v4, what's wrong with <code>Effect.tap((n) =&gt; console.log(n))</code>?</p>
+    <ol>
+      <li><button class="option" data-correct>The callback must return an Effect value</button><span data-why>In v4, tap and andThen only accept Effects. Write Effect.tap((n) =&gt; Effect.log(n)).</span></li>
+      <li><button class="option">tap was removed in v4; use map</button><span data-why>tap still exists. It just requires the callback to return an Effect.</span></li>
+      <li><button class="option">Nothing; tap accepts any function in v4</button><span data-why>That was true in v3. In v4 this is a type error and also crashes at runtime.</span></li>
+      <li><button class="option">console.log must be awaited within the tap</button><span data-why>console.log is synchronous. The problem is that it returns undefined, not an Effect.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. Why write <code>Effect.fn("withdraw")(function*(…) {…})</code> instead of a function that returns <code>Effect.gen</code>?</p>
+    <ol>
+      <li><button class="option" data-correct>It adds a named tracing span for free</button><span data-why>That is the main reason the maintainers recommend it for reusable functions. The behaviour is otherwise the same.</span></li>
+      <li><button class="option">It runs the Effect immediately when it's called</button><span data-why>Calling it returns a lazy Effect, just like Effect.gen does.</span></li>
+      <li><button class="option">It removes the error channel from the type</button><span data-why>Errors stay in E. The withdraw example's type still has InvalidAmount.</span></li>
+      <li><button class="option">It lets you skip yield* inside the body</button><span data-why>The body is still a generator, and you still use yield*.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: four tasks, about 7 minutes</p>
+    <p>Open <code>lessons/03-building-programs/exercise.ts</code>. The tasks:</p>
+    <ol>
+      <li>Pick the right constructor for three situations.</li>
+      <li>Rewrite an <code>async</code> function with <code>Effect.gen</code>.</li>
+      <li>Write an <code>Effect.fn</code> that fails on invalid input.</li>
+      <li>Build a <code>map</code> + <code>flatMap</code> pipeline.</li>
+    </ol>
+    <p>Run the checks from the <code>effect-v4/</code> folder:</p>
+    <div class="cmd"><pre><code class="language-bash">node lessons/03-building-programs/exercise.ts</code></pre></div>
+    <p>Tasks 2 and 3 have no return-type annotations, so TypeScript infers them. The type checker then confirms the inferred types are the ones you intended:</p>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/03-building-programs</code></pre></div>
+    <p>The reference answers are in <code>solution.ts</code>.</p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 15 minutes)</p>
+    <p><a href="https://effect.website/docs/v4/getting-started/creating-effects">Effect docs: “Creating Effects”</a>, then <a href="https://effect.website/docs/v4/getting-started/using-generators">“Using Generators”</a>. To see how the maintainers write v4 code day to day, skim the <a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">“Effect.gen / Effect.fn” part of LLMS.md</a>. For quick lookup, use the <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher</p>
+    <p>Not sure when to reach for a pipeline instead of a generator? Wondering how <code>yield*</code> manages to “await” without Promises? Ask in this chat. A good test is to paste one of your own <code>async</code> functions and ask how it would look in Effect.</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../02-why-effect/index.html">← Lesson 2: Why not plain TypeScript?</a>
+    <a class="next" href="../04-error-handling/index.html">Lesson 4: Error handling →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>

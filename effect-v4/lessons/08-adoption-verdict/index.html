@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect Adoption Verdict</title>
+  <meta name="description" content="Lesson 8 of the Effect v4 course: adopting Effect incrementally with ManagedRuntime, the real risks, and writing your adopt / pilot / skip verdict.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 8 of 8 · about 15 minutes</p>
+  <h1>The verdict: should your team adopt Effect?</h1>
+  <p class="subtitle">You don't have to rewrite anything to find out.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Run Effect inside an existing async app without a rewrite, name the real risks with sources, and write an adopt / pilot / skip recommendation you can defend to your team.</p>
+  </div>
+
+  <p>This is the lesson the whole course has been building towards. Over seven lessons you have collected pros and costs in the <em>Adoption lens</em> boxes. This lesson adds the last pieces: how Effect fits into code you already have, and the facts about risk. Then you turn your ledger into a verdict.</p>
+
+  <section class="recall">
+    <h2>Warm-up: from memory</h2>
+    <p>Answer each question in your head before you open it.</p>
+    <details>
+      <summary>Lesson 5: what does <code>Effect.provide(layer)</code> do to an Effect's type?</summary>
+      <div class="answer"><p>It removes the services the Layer builds from the <strong>requirements channel</strong> <code>R</code>. Once <code>R</code> is <code>never</code>, you can run the Effect.</p></div>
+    </details>
+    <details>
+      <summary>Lesson 4: code inside <code>Effect.sync</code> throws. Is that an expected error or a defect?</summary>
+      <div class="answer"><p>A <strong>defect</strong>. It does not show up in <code>E</code>. It is recorded in the <code>Cause</code> as a <code>Die</code>, and it's best handled at the edges, for example with <code>Effect.catchDefect</code>.</p></div>
+    </details>
+    <details>
+      <summary>Lessons 4 and 6: what are the v4 names for v3's <code>Effect.catchAll</code> and <code>Effect.fork</code>?</summary>
+      <div class="answer"><p><code>Effect.catch</code> and <code>Effect.forkChild</code>. You'll need both again in today's exercise.</p></div>
+    </details>
+  </section>
+
+  <h2>1. Adopt at the edge, not with a rewrite</h2>
+
+  <p>Recall lesson 1: you <strong>run at the edge</strong>. In a new Effect app, the edge is <code>main</code>. In an existing app, <em>any single function</em> can be the edge. If an <code>async</code> function calls <code>Effect.runPromise</code> inside, it still returns a Promise, and its callers can't tell that anything changed. That lets you adopt Effect one function at a time.</p>
+
+  <p>Real handlers need services such as a database, a mailer or config. You don't want to rebuild those Layers on every request. A <strong><code>ManagedRuntime</code></strong> solves this. The maintainers' guide says it “bridges Effect programs with non-Effect code. Build one runtime from your application Layer, then use it anywhere you need imperative execution, like web handlers, framework hooks, worker queues, or legacy callback APIs.”<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md#L268">[1]</a></sup></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Existing handler: plain TypeScript</p>
+<pre><code>const db = createPool(process.env.DB_URL) // global
+
+export async function getUserHandler(req: Request) {
+  try {
+    const user = await db.findUser(Number(req.params.id))
+    if (!user) return { status: 404, body: { error: "not found" } }
+    return { status: 200, body: user }
+  } catch (e) {
+    // e: unknown. Which failures? Retry? Timeout?
+    return { status: 500, body: { error: "internal" } }
+  }
+}</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Same signature, Effect inside</p>
+<pre><code>const runtime = ManagedRuntime.make(UserRepo.layer) // built once
+
+export async function getUserHandler(req: Request) {
+  return runtime.runPromise(
+    getUser(Number(req.params.id)).pipe(  // Effect&lt;User, UserNotFound, UserRepo&gt;
+      Effect.timeout("2 seconds"),
+      Effect.map((user) =&gt; ({ status: 200, body: user })),
+      Effect.catchTag("UserNotFound", () =&gt;
+        Effect.succeed({ status: 404, body: { error: "not found" } }))
+    )
+  ) // a TimeoutError still rejects → your framework's usual 500
+}
+// on shutdown:
+await runtime.dispose()</code></pre>
+    </div>
+  </div>
+
+  <p>Three facts from the source are worth knowing.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/ManagedRuntime.ts#L240">[2]</a></sup></p>
+  <ul>
+    <li>The Layer “is built lazily on first use and its context is cached for subsequent runs”, so every handler shares one connection pool.</li>
+    <li>Resources the Layer acquired “are released when <code>dispose</code> or <code>disposeEffect</code> is run”. Call <code>await runtime.dispose()</code> on shutdown.</li>
+    <li>“A runtime cannot be reused after disposal.”</li>
+  </ul>
+  <p>The runtime has the same <code>run*</code> family you met in lesson 1 (<code>runPromise</code>, <code>runPromiseExit</code>, <code>runSync</code>, <code>runFork</code>). The difference is that the type checker now accepts Effects that need the runtime's services. The official example wires exactly this into Hono.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/ai-docs/src/04_integration/10_managed-runtime.ts">[3]</a></sup></p>
+
+  <span class="sidenote">This is the real answer to “Effect is all or nothing”. A pilot behind one function's signature can be reverted by swapping that function's body back.</span>
+
+  <h2>2. The risk facts, with sources</h2>
+
+  <p>A verdict needs facts, not vibes. Here is what the primary sources say as of 4.0.0:</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Fact</th><th>What it means for you</th></tr></thead>
+    <tbody>
+      <tr><td><strong>4.x is LTS</strong>, with “at least three years of support”. Bug and security fixes run until at least Sept 2029.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/README.md#L44">[4]</a></sup><sup class="cite"><a href="https://effect.website/blog/releases/effect/40">[5]</a></sup></td><td>Low risk that the core shifts under you during a multi-year project.</td></tr>
+      <tr><td>The core <code>effect</code> package has <strong>zero runtime dependencies</strong>.<sup class="cite"><a href="https://effect.website/blog/releases/effect/40">[5]</a></sup></td><td>Very little supply-chain surface.</td></tr>
+      <tr><td>Bundle: <strong>about 6–7 kB</strong> gzipped for a minimal program, <strong>about 15 kB</strong> with Schema. The blog and MIGRATION.md give slightly different figures.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md">[6]</a></sup></td><td>Small, but not zero. It matters most for frontend bundles.</td></tr>
+      <tr><td><strong>Stability tiers.</strong> Core modules (<code>Effect</code>, <code>Layer</code>, <code>Context</code>) follow strict semver. <code>http</code>, <code>http-api</code>, <code>sql</code>, <code>ai</code>, <code>cli</code>, <code>rpc</code>, <code>cluster</code>, <code>workflow</code> and others are <code>@stability unstable</code>: “may receive breaking changes in minor” releases.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md#L40">[6]</a></sup></td><td>Depending on the core is safe. Building centrally on unstable modules means planning for upgrade work.</td></tr>
+      <tr><td><strong>Performance:</strong> v4 runs 4.57M tasks/s vs v3's 0.71M, and 50,000 fibers use 21.8 MB vs 157.5 MB. These are <em>the project's own benchmarks</em>.<sup class="cite"><a href="https://effect.website/blog/releases/effect/40">[5]</a></sup> The Myths page calls Effect “an app-level coordination library rather than a low-level operation wrapper”.<sup class="cite"><a href="https://effect.website/myths/">[7]</a></sup></td><td>The overhead matters in tight numeric loops, not in I/O-bound services. Measure your own hot paths.</td></tr>
+      <tr><td><strong>Churn in learning material.</strong> v3 tutorials, Stack Overflow answers and LLM output use renamed APIs. Some official pages still lag behind: the Myths page uses v3 names, and the blog footer links to the v3 API docs.</td><td>A real onboarding cost. Your team needs to recognize v3 code on sight (next section).</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <div class="box v3">
+    <p class="box-title">Spotting v3 code: the tell-tale names</p>
+    <p>If a tutorial, blog post or LLM answer contains any of these, it was written for v3 or an early v4 beta. Translate it before you trust it.</p>
+    <ul>
+      <li><code>Context.Tag</code>, <code>Effect.Tag</code>, <code>Effect.Service</code>, <code>MyService.Default</code>: now <code>Context.Service</code> and <code>static layer</code></li>
+      <li><code>ServiceMap.Service</code>: v4 betas before beta.44, now <code>Context.Service</code></li>
+      <li><code>Effect.catchAll</code> / <code>catchAllCause</code>: now <code>Effect.catch</code> / <code>catchCause</code></li>
+      <li><code>Either</code>, <code>Effect.either</code>: now <code>Result</code>, <code>Effect.result</code></li>
+      <li><code>Effect.fork</code> / <code>forkDaemon</code>: now <code>forkChild</code> / <code>forkDetach</code></li>
+      <li><code>Layer.scoped</code>: now <code>Layer.effect</code></li>
+      <li><code>Schedule.intersect</code> / <code>union</code>: now <code>Schedule.max([…])</code> / <code>Schedule.min([…])</code></li>
+      <li><code>Schema.Literal("a", "b")</code>, <code>Schema.Union(A, B)</code>: now array arguments, <code>Literals([…])</code>, <code>Union([…])</code></li>
+      <li><code>Effect.andThen(x =&gt; plainValue)</code>: in v4 it must return an Effect. Use <code>Effect.map</code>.</li>
+    </ul>
+    <p>The full list is in the official <a href="https://github.com/Effect-TS/effect/blob/main/MIGRATION.md">MIGRATION.md</a> and the <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <h2>3. A decision framework</h2>
+
+  <p>The official pitch is that TypeScript “says almost nothing about your programs: a function's signature doesn't tell you what can fail, what dependencies it needs, or whether it can be safely retried, timed out, or interrupted.”<sup class="cite"><a href="https://effect.website/docs/v4/onboarding">[8]</a></sup> That points to a test: <em>how much of your pain lives in exactly those places?</em> The table below is <strong>this course's heuristic</strong>, not an official rule. It combines that pitch with the costs you logged. Test it against your codebase and against practitioners in the Effect Discord.</p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Signal</th><th>Leans adopt</th><th>Leans skip</th></tr></thead>
+    <tbody>
+      <tr><td>Kind of code</td><td>I/O-heavy backend services, workers, CLIs</td><td>Small scripts, UI-only components, mostly pure logic</td></tr>
+      <tr><td>Failure modes</td><td>Many, and they need different handling</td><td>Few, and “log and 500” is fine</td></tr>
+      <tr><td>Dependencies &amp; tests</td><td>Hand-rolled DI or module mocking hurts</td><td>Few dependencies, easy to test already</td></tr>
+      <tr><td>Retries, timeouts, concurrency, cancellation</td><td>Everywhere, written by hand</td><td>Rare</td></tr>
+      <tr><td>Observability</td><td>You want spans and structured logs per operation</td><td>Not a need</td></tr>
+      <tr><td>Team</td><td>Time to learn, and someone willing to champion it</td><td>Deadline-bound, no learning budget, high turnover</td></tr>
+      <tr><td>Modules relied on</td><td>Mostly the stable core</td><td>Central bets on unstable modules (<code>http</code>, <code>sql</code>, <code>ai</code>)</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>When the signals are mixed, the usual cheap middle path is a <strong>pilot</strong>. Pick one bounded piece with real failure modes, such as an outbound API integration that needs retries. Put it behind a <code>ManagedRuntime</code> and keep its signature unchanged. Decide your success criteria <em>before</em> you start.</p>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: the final entries</p>
+    <ul>
+      <li><strong>Pro:</strong> you can adopt incrementally. One function at a time, behind unchanged signatures, so being wrong is cheap to undo.</li>
+      <li><strong>Pro:</strong> the LTS guarantee and a zero-dependency core lower the long-term risk of the core.</li>
+      <li><strong>Cost:</strong> the unstable modules and v3-era material mean ongoing upgrade and translation work. Budget for it if you use them.</li>
+      <li><strong>Cost:</strong> the learning curve is the cost you can't buy your way out of. Your own experience with this course is evidence. Write it down.</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up.</p>
+
+  <div class="quiz">
+    <p class="q">1. You want to try Effect in an existing Express app. What is the smallest safe first step?</p>
+    <ol>
+      <li><button class="option" data-correct>Run one handler's logic with a ManagedRuntime</button><span data-why>The handler keeps its signature, so the rest of the app is untouched and the change is easy to revert.</span></li>
+      <li><button class="option">Rewrite every route as Effect programs first</button><span data-why>That is a big-bang rewrite: costly to do and hard to undo. Running at the edge lets you start with one function.</span></li>
+      <li><button class="option">Replace Express with an Effect HTTP server</button><span data-why>That swaps your whole stack for an unstable module before you have any evidence.</span></li>
+      <li><button class="option">Convert all Promises to Effects before deploying</button><span data-why>Effect code and Promise code can coexist. runPromise is the bridge, so nothing has to convert first.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. What does <code>await runtime.dispose()</code> do for a <code>ManagedRuntime</code>?</p>
+    <ol>
+      <li><button class="option" data-correct>Releases the resources its Layer acquired</button><span data-why>It runs the Layer's finalizers. Afterwards the runtime can't be reused.</span></li>
+      <li><button class="option">Rebuilds the Layer before every run</button><span data-why>It's the opposite: the Layer is built once, cached, and shared until you dispose.</span></li>
+      <li><button class="option">Interrupts fibers but keeps the Layer</button><span data-why>Disposing closes the runtime's whole scope, including the Layer's resources.</span></li>
+      <li><button class="option">Nothing; Node cleans up at exit</button><span data-why>Without dispose, the finalizers (closing pools, flushing logs) never run.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. Your team's plan depends heavily on <code>effect/http</code> and <code>effect/sql</code>. What is the relevant risk?</p>
+    <ol>
+      <li><button class="option" data-correct>Those modules are unstable and may break in minors</button><span data-why>They are tagged @stability unstable. Only untagged core modules follow strict semver.</span></li>
+      <li><button class="option">Those modules are deprecated and will be removed soon</button><span data-why>They are new and actively being stabilised, not deprecated.</span></li>
+      <li><button class="option">Those modules require a separate paid commercial license first</button><span data-why>They ship inside the open-source effect package.</span></li>
+      <li><button class="option">Those modules only work on Bun, not on Node</button><span data-why>There are platform packages for Node, Bun, Deno and the browser.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. An LLM gives you code that uses <code>Effect.catchAll</code> and <code>Context.Tag</code>. What do you conclude?</p>
+    <ol>
+      <li><button class="option" data-correct>It is v3 code; translate the names</button><span data-why>catchAll became Effect.catch, and Context.Tag became Context.Service.</span></li>
+      <li><button class="option">It is fine; v4 kept both names</button><span data-why>Both were removed in v4, so this code won't compile against 4.0.0.</span></li>
+      <li><button class="option">It is broken; Effect removed error handling</button><span data-why>Error handling is still there under new names: Effect.catch, catchTag, catchCause.</span></li>
+      <li><button class="option">It is v4 beta code; just upgrade</button><span data-why>Both are v3 names. The beta-era tell is ServiceMap.Service.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: two coding tasks and your verdict, about 20 minutes</p>
+    <p><strong>Task 1</strong> is translating a v3 snippet from an old blog post into v4. <strong>Task 2</strong> is putting an Effect program behind a <code>ManagedRuntime</code> and calling it from a plain async route handler, then disposing it on shutdown. Open <code>lessons/08-adoption-verdict/exercise.ts</code>, replace each <code>todo()</code> and <code>TODO</code>, and run:</p>
+    <div class="cmd"><pre><code class="language-bash">node lessons/08-adoption-verdict/exercise.ts</code></pre></div>
+    <p>Then run the type checker as well. It catches a runtime built from the wrong Layer: if you forget step 2a, it tells you <code>UserRepo</code> is still required.</p>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/08-adoption-verdict</code></pre></div>
+    <p><strong>Task 3, the real one:</strong> fill in <code>lessons/08-adoption-verdict/my-verdict.md</code>. Describe your codebase and team, copy over your ledger from each lesson's Adoption lens, and pick adopt, pilot or skip. Then write a pilot plan with success criteria and the questions you still have. <strong>Paste it back to your teacher for a critique.</strong></p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 10 minutes)</p>
+    <p><a href="https://effect.website/blog/releases/effect/40">The “Effect 4.0” release post</a>. It covers the project's own account of what changed, the benchmarks and the LTS policy, and it's the document your team will ask about. Then read the official <a href="https://github.com/Effect-TS/effect/blob/main/ai-docs/src/04_integration/10_managed-runtime.ts">ManagedRuntime + Hono example</a> to see this lesson's pattern in a real framework.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher, then ask practitioners</p>
+    <p>Bring <code>my-verdict.md</code> to this chat and ask “What's weak in my reasoning?” The questions a teacher can't settle, like “How did adoption go for teams like ours?”, belong in the <a href="https://discord.gg/effect-ts">Effect Discord</a>, where the core team and experienced users answer daily. That is where knowledge turns into wisdom.</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../07-schema-and-toolbox/index.html">← Lesson 7: Schema, config and the toolbox</a>
+    <a class="next" href="../../index.html">Back to course home →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>

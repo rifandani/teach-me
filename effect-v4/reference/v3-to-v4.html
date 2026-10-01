@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Spotting v3 Code</title>
+  <meta name="description" content="Old Effect v3 names and their v4 replacements, for recognising outdated tutorials and LLM answers.">
+  <link rel="stylesheet" href="../assets/course.css">
+  <style>
+    main { max-width: 58rem; }
+    td:first-child code { color: var(--bad); }
+    td:nth-child(2) code { color: var(--good); }
+    td code { white-space: normal; }
+  </style>
+</head>
+<body>
+<main>
+  <p class="kicker"><a href="../index.html">Effect v4 course</a> · Reference</p>
+  <h1>Spotting v3 code</h1>
+  <p class="subtitle">Most Effect tutorials, Stack Overflow answers and LLM output online were written for v3. If you see a name from the left column, translate it.</p>
+
+  <div class="box tip">
+    <p class="box-title">The three-second test</p>
+    <p>If the code contains <code>Context.Tag</code>, <code>Effect.Service</code>, <code>catchAll</code>, <code>Either</code>, <code>Effect.fork</code> or <code>@effect/platform</code>, it is v3. If it contains <code>ServiceMap.Service</code> or <code>effect/unstable/…</code>, it comes from a v4 <em>beta</em> and is also outdated.</p>
+  </div>
+
+  <h2>Services and layers</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+    <tbody>
+      <tr><td><code>Context.Tag("X")&lt;X, Shape&gt;()</code>, <code>Context.GenericTag</code>, <code>Effect.Tag</code>, <code>Effect.Service</code></td><td><code>Context.Service&lt;X, Shape&gt;()("X")</code>, or <code>Context.Service&lt;X&gt;()("X", { make })</code></td></tr>
+      <tr><td><code>ServiceMap.Service</code> (v4 betas before beta.44)</td><td><code>Context.Service</code></td></tr>
+      <tr><td><code>X.Default</code>, <code>dependencies: [...]</code></td><td>write <code>static layer = Layer.effect(this, this.make)</code> yourself</td></tr>
+      <tr><td>static accessors <code>X.method()</code></td><td><code>yield* X</code>, or <code>X.use(x =&gt; …)</code></td></tr>
+      <tr><td><code>Layer.scoped</code>, <code>Layer.scopedDiscard</code></td><td><code>Layer.effect</code>, <code>Layer.effectDiscard</code></td></tr>
+      <tr><td>layers named <code>FooLive</code></td><td>convention: <code>Foo.layer</code>, <code>Foo.layerTest</code></td></tr>
+      <tr><td>providing a layer twice builds it twice</td><td>memoized across provides (opt out: <code>Layer.fresh</code>, <code>{ local: true }</code>)</td></tr>
+      <tr><td><code>FiberRef</code>, <code>Effect.locally</code></td><td><code>Context.Reference</code>, <code>References.*</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Errors</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+    <tbody>
+      <tr><td><code>Effect.catchAll</code></td><td><code>Effect.catch</code></td></tr>
+      <tr><td><code>Effect.catchAllCause</code> / <code>catchAllDefect</code></td><td><code>Effect.catchCause</code> / <code>catchDefect</code></td></tr>
+      <tr><td><code>Effect.catchSome</code></td><td><code>Effect.catchFilter</code></td></tr>
+      <tr><td><code>Effect.orElse</code></td><td><code>Effect.catch</code></td></tr>
+      <tr><td><code>Effect.either</code>, <code>Either</code>, <code>Either.left/right</code></td><td><code>Effect.result</code>, <code>Result</code>, <code>Result.fail/succeed</code></td></tr>
+      <tr><td><code>Effect.timeoutFail</code>, <code>timeoutTo</code></td><td><code>Effect.timeoutOrElse</code></td></tr>
+      <tr><td><code>Cause</code> tree (<code>Sequential</code>/<code>Parallel</code>), <code>*Exception</code></td><td>flat <code>cause.reasons</code>; <code>*Error</code> (e.g. <code>Cause.TimeoutError</code>)</td></tr>
+      <tr><td><code>FiberFailure</code> wrapping <code>runPromise</code> rejections</td><td>the raw error is rejected or thrown</td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Building programs</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+    <tbody>
+      <tr><td><code>Effect.andThen(x =&gt; plainValue)</code>, <code>Effect.tap(x =&gt; console.log(x))</code></td><td>must return an Effect: <code>Effect.map</code>, <code>Effect.tap(x =&gt; Effect.log(x))</code> (not in the migration docs)</td></tr>
+      <tr><td><code>Effect.zipRight</code> / <code>zipLeft</code></td><td><code>Effect.andThen</code> / <code>Effect.tap</code></td></tr>
+      <tr><td><code>Effect.async</code></td><td><code>Effect.callback</code></td></tr>
+      <tr><td><code>Effect.fromNullable</code></td><td><code>Effect.fromNullishOr</code></td></tr>
+      <tr><td><code>Effect.gen(this, function*() {…})</code></td><td><code>Effect.gen({ self: this }, function*() {…})</code></td></tr>
+      <tr><td><code>Effect.fn.Gen</code></td><td><code>Effect.fn.Return</code></td></tr>
+      <tr><td><code>Effect.Effect.Context&lt;T&gt;</code></td><td><code>Effect.Services&lt;T&gt;</code></td></tr>
+      <tr><td><code>Effect.runtime&lt;R&gt;()</code> + <code>Runtime.runFork</code></td><td><code>Effect.context&lt;R&gt;()</code> + <code>Effect.runForkWith</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Concurrency and scheduling</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+    <tbody>
+      <tr><td><code>Effect.fork</code>, <code>Effect.forkDaemon</code></td><td><code>Effect.forkChild</code>, <code>Effect.forkDetach</code></td></tr>
+      <tr><td><code>yield* fiber</code>, <code>yield* ref</code>, <code>yield* deferred</code></td><td><code>Fiber.join</code>, <code>Ref.get</code>, <code>Deferred.await</code></td></tr>
+      <tr><td><code>Effect.all(…, { mode: "either" })</code></td><td><code>{ mode: "result" }</code></td></tr>
+      <tr><td><code>Schedule.intersect</code> / <code>both</code></td><td><code>Schedule.max([a, b])</code></td></tr>
+      <tr><td><code>Schedule.union</code> / <code>either</code></td><td><code>Schedule.min([a, b])</code></td></tr>
+      <tr><td><code>Schedule.andThen</code></td><td><code>Schedule.concat</code></td></tr>
+      <tr><td><code>Scope.extend</code></td><td><code>Scope.provide</code></td></tr>
+      <tr><td><code>TRef</code>, <code>TMap</code>, <code>TQueue</code></td><td><code>TxRef</code>, <code>TxHashMap</code>, <code>TxQueue</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Schema</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+    <tbody>
+      <tr><td><code>Schema.Literal("a", "b")</code></td><td><code>Schema.Literals(["a", "b"])</code></td></tr>
+      <tr><td><code>Schema.Union(A, B)</code>, <code>Schema.Tuple(A, B)</code></td><td><code>Schema.Union([A, B])</code>, <code>Schema.Tuple([A, B])</code></td></tr>
+      <tr><td><code>Schema.Record({ key, value })</code></td><td><code>Schema.Record(key, value)</code></td></tr>
+      <tr><td><code>Schema.decodeUnknown</code>, <code>decodeUnknownEither</code></td><td><code>Schema.decodeUnknownEffect</code>, <code>decodeUnknownExit</code></td></tr>
+      <tr><td><code>Schema.parseJson(s)</code></td><td><code>Schema.fromJsonString(s)</code></td></tr>
+      <tr><td><code>Schema.minLength(1)</code>, <code>int()</code>, <code>pattern</code></td><td><code>.check(Schema.isMinLength(1))</code>, <code>isInt</code>, <code>isPattern</code></td></tr>
+      <tr><td><code>Schema.Date</code> (decodes from a string)</td><td><code>Schema.DateFromString</code>; <code>Schema.Date</code> now means a <code>Date</code> object</td></tr>
+      <tr><td><code>annotations</code>, <code>compose</code></td><td><code>annotate</code>, <code>decodeTo</code></td></tr>
+    </tbody>
+  </table></div>
+
+  <h2>Packages and imports</h2>
+  <div class="table-wrap"><table>
+    <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+    <tbody>
+      <tr><td><code>@effect/platform</code>, <code>@effect/rpc</code>, <code>@effect/cli</code>, <code>@effect/ai</code>, … at <code>0.x</code></td><td>merged into <code>effect</code>: <code>effect/http</code>, <code>effect/rpc</code>, <code>effect/cli</code>, <code>effect/ai</code> (unstable tier); all <code>@effect/*</code> share version <code>4.0.0</code></td></tr>
+      <tr><td><code>effect/unstable/http</code> (v4 betas)</td><td><code>effect/http</code></td></tr>
+      <tr><td><code>effect/TestClock</code></td><td><code>effect/testing/TestClock</code></td></tr>
+      <tr><td><code>Equal.equals({a:1}, {a:1}) === false</code></td><td><code>true</code>: structural equality by default</td></tr>
+    </tbody>
+  </table></div>
+
+  <div class="box tip">
+    <p class="box-title">Asking an LLM for Effect code?</p>
+    <p>Say “Effect v4 (4.0.0)” explicitly, and point it at <a href="https://github.com/Effect-TS/effect/blob/main/LLMS.md">LLMS.md</a>, the maintainers' style guide written for this purpose. Then check its answer against this page.</p>
+  </div>
+
+  <p>Sources: <a href="https://github.com/Effect-TS/effect/blob/main/MIGRATION.md">MIGRATION.md</a>, <a href="https://github.com/Effect-TS/effect/tree/main/migration">migration/*.md</a>, and the generated <a href="https://github.com/Effect-TS/effect/blob/main/migration/v3-to-v4.md">v3-to-v4.md</a>. Where each row was verified is listed in <a href="../research/effect-v4.md">research/effect-v4.md</a> (“v3 → v4 changes cheat list”).</p>
+
+  <nav class="course-nav">
+    <a href="cheatsheet.html">← Cheat sheet</a>
+    <a class="next" href="../index.html">Course home →</a>
+  </nav>
+</main>
+<script src="../assets/course.js"></script>
+</body>
+</html>

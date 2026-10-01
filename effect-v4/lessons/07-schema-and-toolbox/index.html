@@ -1,0 +1,240 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Schema and Toolbox</title>
+  <meta name="description" content="Lesson 7 of the Effect v4 course: Schema for types plus validation, typed Config, logging, and which parts of the box are stable.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 7 of 8 · about 14 minutes</p>
+  <h1>Schema, config and what else is in the box</h1>
+  <p class="subtitle">One definition for a type and its validator, plus the batteries you'd otherwise install.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Define a <code>Schema</code>, use it to turn <code>unknown</code> input into a typed value (or a typed <code>SchemaError</code>), and read typed configuration. Then say which parts of the <code>effect</code> package are stable enough to bet a team on.</p>
+  </div>
+
+  <section class="recall">
+    <h2>Warm-up: recall before you read</h2>
+    <p>Answer each one in your head first, then open it to check.</p>
+    <details>
+      <summary>Lesson 1: why can't you <code>runPromise</code> an effect whose <code>R</code> isn't <code>never</code>?</summary>
+      <div class="answer"><p>Every runner needs <code>R = never</code>. Any required service has to be <strong>provided</strong> first, or the code doesn't compile.</p></div>
+    </details>
+    <details>
+      <summary>Lesson 4: what happens to the error channel after <code>Effect.catchTag("NotFound", …)</code>?</summary>
+      <div class="answer"><p><code>NotFound</code> is removed from <code>E</code>. The type now lists only the <strong>expected errors</strong> you haven't handled yet.</p></div>
+    </details>
+    <details>
+      <summary>Lesson 5: how do you run the same business logic against a fake mailer in a test?</summary>
+      <div class="answer"><p>Provide a different <strong>Layer</strong> for the same <strong>service key</strong>, for example <code>Effect.provide(MailerTest)</code> instead of <code>Mailer.layer</code>. The logic itself doesn't change.</p></div>
+    </details>
+  </section>
+
+  <h2>1. Schema: one definition, three jobs</h2>
+
+  <p>Data that comes from outside your program (request bodies, JSON files, environment variables) arrives as <code>unknown</code>. In plain TypeScript you usually write the type and a validation function separately, and nothing makes them stay in sync. The maintainers' own guide is blunt about it: “All validation and domain modeling in Effect is done with <code>Schema</code>.”<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">[1]</a></sup> In v4 it ships inside the core package, as <code>import { Schema } from "effect"</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/SCHEMA.md">[2]</a></sup></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript: two things to keep in sync</p>
+<pre><code>type User = {
+  id: number
+  name: string
+  role: "admin" | "member"
+}
+
+function isUser(u: unknown): u is User {
+  const x = u as any
+  return Number.isInteger(x?.id)
+    &amp;&amp; typeof x?.name === "string" &amp;&amp; x.name.length &gt; 0
+    &amp;&amp; (x?.role === "admin" || x?.role === "member")
+}
+// Add a field to the type, forget the guard:
+// it still compiles. And the guard says "no",
+// not *why*.</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect: the schema is the single source</p>
+<pre><code>import { Schema } from "effect"
+
+const User = Schema.Struct({
+  id: Schema.Int,
+  name: Schema.String.check(Schema.isMinLength(1)),
+  role: Schema.Literals(["admin", "member"])
+})
+
+type User = typeof User.Type
+// { readonly id: number; readonly name: string;
+//   readonly role: "admin" | "member" }
+
+// The validator and decoder come from the same
+// value, so they can't drift from the type.</code></pre>
+    </div>
+  </div>
+
+  <p>That one value gives you three things: a <strong>type</strong> (<code>typeof User.Type</code>), a <strong>validator</strong>, and a <strong>decoder</strong> that turns <code>unknown</code> input into a typed value.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/ai-docs/src/01_effect/02_schema/10_schema-basics.ts">[3]</a></sup> You choose how a failure should reach you:</p>
+
+<pre><code>// Throws on bad input. Fine in a script or a test.
+const ada = Schema.decodeUnknownSync(User)({ id: 1, name: "Ada", role: "admin" })
+
+// Returns Effect&lt;User, SchemaError&gt;. The failure is an expected error, so catchTag works.
+const program = Schema.decodeUnknownEffect(User)({ id: "1", name: "", role: "owner" }).pipe(
+  Effect.catchTag("SchemaError", (e) =&gt; Effect.succeed(`invalid: ${e.message}`))
+) // → 'invalid: Expected number\n  at ["id"]'
+
+// Parse a JSON string and decode it in one step
+Schema.decodeUnknownSync(Schema.fromJsonString(User))('{"id":2,"name":"Lin","role":"member"}')</code></pre>
+
+  <p>Look at the middle example. <code>SchemaError</code> is a <strong>tagged error</strong>, so it shows up in <code>E</code> and you handle it with the same <code>catchTag</code> you learned in lesson 4. Invalid input doesn't need a separate error-handling style.</p>
+
+  <p>Lesson 4 also mentioned <code>Schema.TaggedError</code>. Now you can see why it exists: the error's fields are described by a schema, so the error can be validated and serialized, for example to send it over HTTP or RPC. The maintainers' examples use it throughout.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Schema.ts#L15151">[4]</a></sup></p>
+
+<pre><code>class UserNotFound extends Schema.TaggedError&lt;UserNotFound&gt;()("UserNotFound", {
+  id: Schema.Int
+}) {}   // yieldable, catchable with catchTag, and a real Error subclass</code></pre>
+
+  <span class="sidenote">One gotcha: in v4, <code>Schema.Date</code> means a <code>Date</code> object. To accept an ISO string like <code>"2026-10-01"</code>, use <code>Schema.DateFromString</code>. The migration guide warns that old code “can still type-check after upgrading while no longer accepting the same input”.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/schema.md">[5]</a></sup></span>
+
+  <div class="box v3">
+    <p class="box-title">Reading older tutorials? Schema v3 vs v4</p>
+    <ul>
+      <li><code>Schema.Literal("a", "b")</code> → <code>Schema.Literals(["a", "b"])</code>. Arguments that used to be a list are now arrays: <code>Union(A, B)</code> → <code>Union([A, B])</code>.</li>
+      <li><code>Schema.decodeUnknown</code> → <code>Schema.decodeUnknownEffect</code>; <code>decodeUnknownEither</code> → <code>decodeUnknownExit</code>.</li>
+      <li><code>Schema.parseJson(S)</code> → <code>Schema.fromJsonString(S)</code>.</li>
+      <li>Refinements gained an <code>is</code> prefix and go through <code>.check</code>: <code>minLength(1)</code> → <code>.check(Schema.isMinLength(1))</code>, <code>int()</code> → <code>.check(Schema.isInt())</code>.</li>
+    </ul>
+    <p>Source: the official Schema migration page.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/schema.md">[5]</a></sup></p>
+  </div>
+
+  <h2>2. Config and logging, briefly</h2>
+
+  <p><code>process.env.PORT</code> is a <code>string | undefined</code> that you parse and check by hand, often at import time. A <code>Config</code> is a typed description of a setting. Yielding it reads from the current provider, which is <code>process.env</code> by default. A missing or malformed key fails with a typed <code>ConfigError</code> in <code>E</code>, so it doesn't crash your app at import time.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/CONFIG.md">[6]</a></sup></p>
+
+<pre><code>const server = Effect.gen(function*() {
+  const host   = yield* Config.String("HOST")
+  const port   = yield* Config.Int("PORT")
+  const apiKey = yield* Config.Redacted("API_KEY")   // prints as &lt;redacted&gt;
+  return { host, port }
+})   // Effect&lt;{ host: string; port: number }, ConfigError&gt;
+
+// In tests, swap the source: it is just another Layer
+const TestConfig = ConfigProvider.layer(
+  ConfigProvider.fromUnknown({ HOST: "localhost", PORT: "8080", API_KEY: "s3cret" })
+)
+server.pipe(Effect.provide(TestConfig))</code></pre>
+
+  <p>Notice the pattern from lesson 5 again: the config <em>source</em> is something you provide, so tests don't need to touch <code>process.env</code>. Logging is built in the same way. <code>Effect.log</code>, <code>logInfo</code>, <code>logWarning</code> and <code>logError</code> write structured lines, and <code>Effect.annotateLogs({ orderId })</code> attaches fields to every line beneath it. Every <code>Effect.fn("checkout")</code> you wrote in lesson 3 also creates a <strong>tracing span</strong> named <code>checkout</code>. For new projects, the maintainers suggest exporting those spans with the lightweight OTLP modules in <code>effect/observability</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">[1]</a></sup><sup class="cite"><a href="https://effect.website/docs/v4/observability/logging">[7]</a></sup></p>
+
+  <h2>3. What else is in the box, and how stable is it?</h2>
+
+  <p>Many libraries you'd normally install separately ship inside <code>effect</code> 4.0: <code>@effect/platform</code>, <code>rpc</code>, <code>cli</code>, <code>ai</code> and others were merged in.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md">[8]</a></sup> For an adoption decision, the important question isn't “is it in the box?” but “<em>what promise comes with it?</em>” APIs tagged <code>@stability unstable</code> may break in <strong>minor</strong> releases. Untagged APIs follow strict semver.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md">[8]</a></sup></p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th>Area</th><th>Import</th><th>Stability in 4.0.0</th></tr></thead>
+    <tbody>
+      <tr><td>Core: Effect, Layer, Context, Data, Schedule, Config, Logger</td><td><code>"effect"</code></td><td>Stable: no <code>@stability</code> tags in these modules</td></tr>
+      <tr><td>Streams, queues, state: Stream, Queue, PubSub, Ref</td><td><code>"effect"</code></td><td>Stable: no tags in <code>Stream</code> or <code>Queue</code></td></tr>
+      <tr><td>Schema</td><td><code>"effect"</code></td><td>Mostly stable; about 120 advanced items are tagged</td></tr>
+      <tr><td>Time, caching: DateTime, Duration, Cron, Cache, ManagedRuntime</td><td><code>"effect"</code></td><td>Core package</td></tr>
+      <tr><td>HTTP client and server, schema-first HTTP APIs</td><td><code>effect/http</code>, <code>effect/http-api</code></td><td><strong>Unstable</strong></td></tr>
+      <tr><td>SQL, AI providers, CLI, RPC, cluster, workflow</td><td><code>effect/sql</code>, <code>effect/ai</code>, <code>effect/cli</code>, <code>effect/rpc</code>, …</td><td><strong>Unstable</strong></td></tr>
+      <tr><td>OTLP export, Schema compilers (<code>Model</code>)</td><td><code>effect/observability</code>, <code>effect/schema</code></td><td><strong>Unstable</strong></td></tr>
+      <tr><td>Runtime per platform (<code>NodeRuntime.runMain</code>, FileSystem)</td><td><code>@effect/platform-node</code> (also bun, deno, browser)</td><td>Separate package, same version as <code>effect</code></td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The full unstable list is: ai, cli, cluster, devtools, eventlog, http, http-api, jsonschema, observability, persistence, process, reactivity, rpc, schema, socket, sql, workflow and workers.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/MIGRATION.md">[8]</a></sup> The 4.0 release post calls stabilising them the team's “first priority”.<sup class="cite"><a href="https://effect.website/blog/releases/effect/40">[9]</a></sup> Watch out for the similar names: <code>Schema</code> from <code>"effect"</code> is core, but the <code>effect/schema</code> subpath is a different, unstable module.</p>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: add to your ledger</p>
+    <ul>
+      <li><strong>Pro:</strong> validation, typed config, structured logging and tracing come with the core package. You don't have to wire zod, dotenv and a logger together, and their failures land in the same <code>E</code> channel as everything else.</li>
+      <li><strong>Pro:</strong> <code>Schema.TaggedError</code> and <code>fromJsonString</code> mean errors and payloads can cross process boundaries with one definition.</li>
+      <li><strong>Cost:</strong> the parts many teams want first (HTTP, SQL, AI) are <strong>unstable</strong> in 4.0.0 and can break in minor releases. Pin versions, or keep your existing HTTP and DB libraries and wrap them with <code>Effect.tryPromise</code>.</li>
+      <li><strong>Cost:</strong> Schema has its own large API, and v3 Schema tutorials are now misleading (see the v3 box above).</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up.</p>
+
+  <div class="quiz">
+    <p class="q">1. You get a JSON <em>string</em> from a request body and want bad input as a typed error in <code>E</code>. What do you use?</p>
+    <ol>
+      <li><button class="option" data-correct>decodeUnknownEffect on a fromJsonString schema</button><span data-why>fromJsonString parses the string first, and decodeUnknownEffect puts any SchemaError in the error channel.</span></li>
+      <li><button class="option">decodeUnknownSync on a fromJsonString schema</button><span data-why>The Sync variant throws on bad input, so the error never reaches E.</span></li>
+      <li><button class="option">JSON.parse, then cast the result</button><span data-why>A cast checks nothing at runtime. Bad input passes through silently.</span></li>
+      <li><button class="option">decodeUnknownEffect on plain Body schema</button><span data-why>The input is a string, not an object, so the plain struct schema would reject every request.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. What does <code>typeof User.Type</code> give you?</p>
+    <ol>
+      <li><button class="option" data-correct>The TypeScript type of a decoded value</button><span data-why>.Type is the decoded type, the shape your code works with after decoding.</span></li>
+      <li><button class="option">A runtime function that validates unknown input</button><span data-why>typeof X.Type exists only at compile time. Validation comes from the decode functions.</span></li>
+      <li><button class="option">The JSON string form of the schema</button><span data-why>Nothing here produces JSON. .Type is a TypeScript type.</span></li>
+      <li><button class="option">The encoded type before any decoding happens</button><span data-why>That is typeof User.Encoded. .Type is the decoded side.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. A program does <code>yield* Config.Int("PORT")</code>, but <code>PORT</code> isn't set. What happens?</p>
+    <ol>
+      <li><button class="option" data-correct>The effect fails with a typed ConfigError</button><span data-why>Missing config is an expected error in E, so you can catch it or provide a default with Config.withDefault.</span></li>
+      <li><button class="option">The value silently becomes undefined at runtime</button><span data-why>That is how process.env behaves. Config is typed, so it fails instead.</span></li>
+      <li><button class="option">Importing the module throws an uncaught exception</button><span data-why>A Config is read when the effect runs, not at import time, and the failure is typed.</span></li>
+      <li><button class="option">The program waits until the key appears</button><span data-why>Config doesn't poll for values. A missing key is a ConfigError.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. Why does <code>@stability unstable</code> on <code>effect/http</code> matter for your adoption verdict?</p>
+    <ol>
+      <li><button class="option" data-correct>Unstable modules may break in minor releases</button><span data-why>Only untagged APIs get strict semver. Plan to pin versions or wrap your existing libraries.</span></li>
+      <li><button class="option">Unstable modules run slower than stable ones</button><span data-why>The tag is a compatibility promise. It says nothing about performance.</span></li>
+      <li><button class="option">Stable modules require a paid support license</button><span data-why>Everything in effect is open source. The tags describe semver guarantees.</span></li>
+      <li><button class="option">Only unstable modules work with TypeScript 7</button><span data-why>The whole package supports TypeScript 5.9+, with 7 recommended. Stability is unrelated.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: five small tasks, about 7 minutes</p>
+    <p>Open <code>lessons/07-schema-and-toolbox/exercise.ts</code>. Finish the <code>User</code> schema, then replace each <code>todo()</code> and <code>todoValue()</code>. Run from the <code>effect-v4/</code> folder:</p>
+    <div class="cmd"><pre><code class="language-bash">node lessons/07-schema-and-toolbox/exercise.ts</code></pre></div>
+    <p>Task 1 (the schema's type) is checked by the type checker. Predict the type before hovering over anything, then run:</p>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/07-schema-and-toolbox</code></pre></div>
+    <p>Tasks 2 and 4 return plain values, not Effects, so before you fill them in they show ❌ “got undefined” instead of ⬜. The reference answers are in <code>solution.ts</code>.</p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 15 minutes)</p>
+    <p>The first sections of <a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/SCHEMA.md">SCHEMA.md</a>, the official Schema v4 guide. It is long, so read it in chunks and stop after “Classes and Opaque Types”. Then skim <a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/CONFIG.md">CONFIG.md</a>. For quick lookups, use the <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher</p>
+    <p>Anything fuzzy? Ask in this chat, for example “How does Schema compare to zod for my use case?” or “What is the encoded side of a schema actually for?” Bring any quiz questions you missed.</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../06-resources-and-concurrency/index.html">← Lesson 6: Resources and concurrency</a>
+    <a class="next" href="../08-adoption-verdict/index.html">Lesson 8: The verdict →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>

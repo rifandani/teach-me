@@ -1,0 +1,238 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Effect Error Handling</title>
+  <meta name="description" content="Lesson 4 of the Effect v4 course: expected errors vs defects, tagged errors, and catchTag removing errors from the type.">
+  <link rel="stylesheet" href="../../assets/course.css">
+</head>
+<body>
+<main>
+
+  <p class="kicker"><a href="../../index.html">Effect v4 course</a> · Lesson 4 of 8 · about 14 minutes</p>
+  <h1>Errors you can see: expected errors vs defects</h1>
+  <p class="subtitle">Failures go in the type, bugs go in the Cause, and handling an error removes it from the type.</p>
+
+  <div class="box win">
+    <p class="box-title">Your win for this lesson</p>
+    <p>Define <strong>tagged errors</strong>, handle one with <code>catchTag</code> and predict exactly which errors are left in <code>E</code>. Also explain why a <strong>defect</strong> is a different thing from an <strong>expected error</strong>.</p>
+  </div>
+
+  <p>Typed errors are the feature people cite most when they pitch Effect, so they matter most for your verdict. This lesson shows you what the pitch actually buys you, and what it costs.</p>
+
+  <section class="recall">
+    <h2>Warm-up: from earlier lessons</h2>
+    <p>Answer in your head first, then open each one to check.</p>
+    <details>
+      <summary>What do the three channels in <code>Effect&lt;A, E, R&gt;</code> mean, and what does <code>never</code> mean in <code>E</code>?</summary>
+      <div class="answer"><p><code>A</code> is the success value, <code>E</code> is the expected errors, and <code>R</code> is the required services. <code>E = never</code> means the effect cannot fail with an expected error. (<a href="../01-mental-model/index.html">Lesson 1</a>)</p></div>
+    </details>
+    <details>
+      <summary>In a plain TypeScript <code>try { … } catch (e) { … }</code>, what type is <code>e</code>, and why is that a problem?</summary>
+      <div class="answer"><p><code>unknown</code>. The signature of the function you called never said what it throws, so the compiler can't tell you which failures exist or whether you handled them. (<a href="../02-why-effect/index.html">Lesson 2</a>)</p></div>
+    </details>
+    <details>
+      <summary>Inside <code>Effect.gen</code>, how do you fail with an error so that TypeScript knows the function stops there?</summary>
+      <div class="answer"><p><code>return yield* new MyError(...)</code>. Errors are yieldable, and the <code>return</code> tells TypeScript execution doesn't continue. (<a href="../03-building-programs/index.html">Lesson 3</a>)</p></div>
+    </details>
+  </section>
+
+  <h2>1. Two kinds of failure</h2>
+
+  <p>Effect separates two things that plain TypeScript lumps together as “something was thrown”.<sup class="cite"><a href="https://effect.website/docs/v4/error-management/two-error-types">[1]</a></sup></p>
+
+  <div class="table-wrap">
+  <table>
+    <thead><tr><th></th><th>Expected error</th><th>Defect</th></tr></thead>
+    <tbody>
+      <tr><td>What it is</td><td>A failure that is part of the domain: card declined, user not found</td><td>A bug or an impossible state: a null where there can't be one, a broken invariant</td></tr>
+      <tr><td>Where it lives</td><td>In the type, in the <code>E</code> channel</td><td><em>Not</em> in the type. It is recorded only in the <code>Cause</code></td></tr>
+      <tr><td>How it's made</td><td><code>Effect.fail(e)</code>, or <code>yield* new MyError()</code></td><td><code>Effect.die(e)</code>, an exception thrown inside <code>Effect.sync</code> or <code>map</code>, or <code>Effect.orDie</code></td></tr>
+      <tr><td>Who handles it</td><td>Callers recover with <code>catchTag</code> or <code>catch</code></td><td>Usually nobody in domain code. Log it at the app's boundary</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <p>The docs put it plainly: “Defects usually should not be recovered from inside domain logic.” They get handled at boundaries, with tools like <code>Effect.exit</code>, <code>Effect.catchDefect</code> or <code>Effect.catchCause</code>.<sup class="cite"><a href="https://effect.website/docs/v4/error-management/unexpected-errors">[2]</a></sup> The split keeps your error types honest. <code>E</code> lists only the failures a caller could reasonably do something about.</p>
+
+  <span class="sidenote">A useful test: “Would any caller write a branch for this?” If yes, it's an expected error. If the only sensible reaction is “fix the code or the config”, it's a defect.</span>
+
+  <h2>2. Tagged errors, and the type that shrinks</h2>
+
+  <p>An expected error is usually a class made with <code>Data.TaggedError</code>.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/packages/effect/src/Data.ts#L761">[3]</a></sup> The string you pass becomes a <code>_tag</code> field, and Effect uses it to tell errors apart:</p>
+
+<pre><code>import { Data, Effect } from "effect"
+
+class NetworkError extends Data.TaggedError("NetworkError")&lt;{ readonly status: number }&gt; {}
+class ValidationError extends Data.TaggedError("ValidationError")&lt;{ readonly field: string }&gt; {}
+
+new NetworkError({ status: 503 })._tag  // "NetworkError"</code></pre>
+
+  <p>These errors are <strong>yieldable</strong>. Inside a generator, <code>yield* new NetworkError({ status: 503 })</code> means the same as <code>Effect.fail(...)</code>.<sup class="cite"><a href="https://effect.website/docs/v4/error-management/yieldable-errors">[4]</a></sup> Here is the most important idea in this lesson. <strong>Handling an error removes it from the type.</strong></p>
+
+  <div class="compare">
+    <div>
+      <p class="code-label before">Plain TypeScript: guess and check</p>
+<pre><code>async function load(): Promise&lt;string&gt; {
+  // might throw NetworkError… or ValidationError…
+  // …or anything else. The signature doesn't say.
+}
+
+try {
+  return await load()
+} catch (e) {            // e: unknown
+  if (e instanceof NetworkError) return "cached"
+  throw e                // did we miss a case?
+}                        // the compiler can't tell you</code></pre>
+    </div>
+    <div>
+      <p class="code-label after">Effect: the compiler keeps score</p>
+<pre><code>declare const load: Effect.Effect&lt;string, NetworkError | ValidationError&gt;
+
+const handled = load.pipe(
+  Effect.catchTag("NetworkError", (e) =&gt;
+    Effect.succeed(`cached (status ${e.status})`))
+)
+// handled: Effect&lt;string, ValidationError&gt;
+//                         ^ NetworkError is gone.
+//   `e` was typed as NetworkError, so e.status works.</code></pre>
+    </div>
+  </div>
+
+  <p>The other error-handling tools work on the same principle:<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/error-handling.md">[5]</a></sup></p>
+
+<pre><code>load.pipe(Effect.catchTags({                       // Effect&lt;string, never&gt;
+  NetworkError: (e) =&gt; Effect.succeed(`network ${e.status}`),
+  ValidationError: (e) =&gt; Effect.succeed(`invalid ${e.field}`)
+}))
+load.pipe(Effect.catch((e) =&gt; Effect.succeed(`failed: ${e._tag}`)))  // every expected error → never
+load.pipe(Effect.mapError((e) =&gt; `wrapped ${e._tag}`))              // Effect&lt;string, string&gt;: transform, don't recover
+load.pipe(Effect.orDie)                                               // Effect&lt;string, never&gt;: "can't happen here" → defect</code></pre>
+
+  <p>In v4, <code>catchTag</code> also takes an array of tags, as in <code>Effect.catchTag(["NetworkError", "ValidationError"], handler)</code>.<sup class="cite"><a href="https://effect.website/docs/v4/error-management/expected-errors">[6]</a></sup> If you annotate a function's return type as <code>Effect.Effect&lt;string&gt;</code>, that means <code>E = never</code>. The compiler then refuses to build until every expected error is handled, which gives you exhaustive error handling.</p>
+
+  <div class="box tip">
+    <p class="box-title">Gotcha: tags must be unique</p>
+    <p>Suppose two different classes both use the tag <code>"NotFound"</code>. <code>catchTag("NotFound")</code> can't tell them apart, and nothing warns you.<sup class="cite"><a href="https://effect.website/docs/v4/error-management/yieldable-errors">[4]</a></sup> Give tags distinct, specific names, like <code>UserNotFound</code> and <code>OrderNotFound</code>.</p>
+  </div>
+
+  <p>There is a second way to define errors: <code>Schema.TaggedError</code>. It builds errors that can be serialized, for example sent over HTTP. The maintainers' own style guide uses it throughout.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/LLMS.md">[7]</a></sup> You'll meet it in <a href="../07-schema-and-toolbox/index.html">lesson 7</a>. <code>Data.TaggedError</code> is all you need for now.</p>
+
+  <h2>3. Outcomes as data: <code>Result</code> and <code>Exit</code></h2>
+
+  <p>Sometimes you don't want to recover. You just want to <em>look</em> at the outcome. <code>Effect.result</code> turns a failure into a value. The new effect can't fail, and it succeeds with a <code>Result</code>:</p>
+
+<pre><code>const program = Effect.gen(function*() {
+  const r = yield* Effect.result(parsePort("abc"))   // Result&lt;number, string&gt;
+  return Result.match(r, {
+    onSuccess: (port) =&gt; `port ${port}`,
+    onFailure: (err) =&gt; `error: ${err}`
+  })
+})</code></pre>
+
+  <p>At the edge, <code>Effect.runPromiseExit</code> gives you an <code>Exit</code>, which is either a success with its value or a failure with its <code>Cause</code>. In v4 a Cause is a flat list, <code>cause.reasons</code>. Each reason is a <code>Fail</code> (expected error), a <code>Die</code> (defect) or an <code>Interrupt</code>. Helpers like <code>Cause.hasDies(cause)</code> check which kinds are present.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/cause.md">[8]</a></sup> This is how you can tell that an error was a <em>bug</em> rather than a domain failure, even after the fact.</p>
+
+  <div class="box v3">
+    <p class="box-title">Reading older tutorials? v3 vs v4 names</p>
+    <div class="table-wrap">
+    <table>
+      <thead><tr><th>v3 (outdated)</th><th>v4</th></tr></thead>
+      <tbody>
+        <tr><td><code>Effect.catchAll</code></td><td><code>Effect.catch</code></td></tr>
+        <tr><td><code>Effect.catchAllCause</code></td><td><code>Effect.catchCause</code></td></tr>
+        <tr><td><code>Effect.catchAllDefect</code></td><td><code>Effect.catchDefect</code></td></tr>
+        <tr><td><code>Effect.catchSome</code></td><td><code>Effect.catchFilter</code></td></tr>
+        <tr><td><code>Effect.either</code>, the <code>Either</code> module</td><td><code>Effect.result</code>, the <code>Result</code> module</td></tr>
+        <tr><td><code>Cause</code> as a tree (<code>Sequential</code>/<code>Parallel</code>)</td><td>flat <code>cause.reasons</code></td></tr>
+      </tbody>
+    </table>
+    </div>
+    <p><code>catchTag</code>, <code>catchTags</code> and <code>catchIf</code> keep their names.<sup class="cite"><a href="https://github.com/Effect-TS/effect/blob/67ba4e46a11ccda0b6761578bfd22c04ae00167d/migration/error-handling.md">[5]</a></sup> The official Myths page still shows <code>catchAll</code> and <code>Either</code>, because it hasn't been updated for v4 yet.</p>
+  </div>
+
+  <div class="box adopt">
+    <p class="box-title">Adoption lens: add to your ledger</p>
+    <ul>
+      <li><strong>Pro:</strong> a function's failure modes are part of its signature, and the compiler checks them. Handling an error removes it from the type, and <code>E = never</code> proves you handled everything.</li>
+      <li><strong>Pro:</strong> bugs (defects) stay out of your domain error types, so <code>E</code> doesn't fill up with “anything could happen” noise.</li>
+      <li><strong>Cost:</strong> you write an error class for each failure. You also have to wrap throwing or rejecting libraries at the boundary (<code>Effect.try</code>, <code>Effect.tryPromise</code>), or their exceptions show up as defects.</li>
+      <li><strong>Cost:</strong> your team has to agree on what is “expected” and what is a defect, and pick <code>Data</code> or <code>Schema</code> errors. These are design decisions, not mechanical ones.</li>
+    </ul>
+  </div>
+
+  <h2>Check yourself</h2>
+  <p>Answer from memory before scrolling back up.</p>
+
+  <div class="quiz">
+    <p class="q">1. <code>load</code> is <code>Effect&lt;string, NetworkError | ValidationError&gt;</code>. After <code>.pipe(Effect.catchTag("NetworkError", () =&gt; Effect.succeed("cached")))</code>, what is in <code>E</code>?</p>
+    <ol>
+      <li><button class="option" data-correct>Only ValidationError is left in the error channel</button><span data-why>catchTag handled NetworkError, so it was removed from the union.</span></li>
+      <li><button class="option">Only NetworkError is left in the error channel</button><span data-why>That's backwards. The tag you catch is the one that disappears.</span></li>
+      <li><button class="option">Both errors stay, since catchTag only logs them</button><span data-why>catchTag recovers. The handler's effect replaces the failure, so the handled error leaves the type.</span></li>
+      <li><button class="option">No errors remain, since catchTag handles all errors</button><span data-why>catchTag handles one tag (or a listed set). Effect.catch is the one that handles every expected error.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">2. <code>Effect.sync(() =&gt; JSON.parse(text))</code> runs with invalid <code>text</code>. What happens?</p>
+    <ol>
+      <li><button class="option" data-correct>It becomes a defect, not a typed error</button><span data-why>The function given to Effect.sync must not throw. If it does, that's a defect. Use Effect.try to get a typed error instead.</span></li>
+      <li><button class="option">It becomes a SyntaxError in the E channel</button><span data-why>Effect.sync has E = never. Only Effect.try, with a catch mapping, puts the exception into E.</span></li>
+      <li><button class="option">The whole program crashes before Effect sees it</button><span data-why>Effect captures the exception and records it in the Cause as a Die.</span></li>
+      <li><button class="option">It is silently ignored and returns undefined instead</button><span data-why>Nothing is swallowed. The effect fails, and the failure is recorded as a defect.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">3. Which of these can recover from a <em>defect</em>?</p>
+    <ol>
+      <li><button class="option" data-correct>Effect.catchDefect, used at the app's boundary</button><span data-why>Defects aren't in E, so only the defect- or Cause-level tools (catchDefect, catchCause) see them.</span></li>
+      <li><button class="option">Effect.catch, since it handles every error</button><span data-why>Effect.catch handles every expected error, the ones in E. Defects bypass it.</span></li>
+      <li><button class="option">Effect.catchTag, matching on the Die tag</button><span data-why>"Die" is the tag of a Cause reason, not of an error in E. catchTag only sees E.</span></li>
+      <li><button class="option">Effect.mapError, turning it into a failure</button><span data-why>mapError transforms errors in E. It never sees defects.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="quiz">
+    <p class="q">4. Two different error classes both use the tag <code>"NotFound"</code>. What happens?</p>
+    <ol>
+      <li><button class="option" data-correct>catchTag can't tell them apart, and nothing warns</button><span data-why>The docs warn that tags must be unique. Matching is by the _tag string alone.</span></li>
+      <li><button class="option">TypeScript reports a compile error about duplicate tags</button><span data-why>There's no such check. That's exactly why the docs call this out as a gotcha.</span></li>
+      <li><button class="option">Effect throws at startup when both classes load</button><span data-why>Nothing checks tags at runtime either. The bug stays silent.</span></li>
+      <li><button class="option">The second class silently gets a renamed tag</button><span data-why>The tag is exactly the string you pass. Effect never renames it.</span></li>
+    </ol>
+    <p class="feedback" aria-live="polite"></p>
+  </div>
+
+  <div class="exercise">
+    <p class="box-title">Exercise: a checkout with two failure modes, about 6 minutes</p>
+    <p>Open <code>lessons/04-error-handling/exercise.ts</code>. You'll make <code>reserve</code> fail with a tagged error, then handle one error with <code>catchTag</code> and <em>predict</em> what's left in <code>E</code>. Next you'll handle both with <code>catchTags</code>. Finally you'll turn a “can't happen” config failure into a defect and watch <code>Effect.catch</code> fail to catch it. Run from the <code>effect-v4/</code> folder:</p>
+    <div class="cmd"><pre><code class="language-bash">node lessons/04-error-handling/exercise.ts</code></pre></div>
+    <p>Task 2 includes a type-level check. Write your answer for <code>Remaining</code> before you hover over anything, then run:</p>
+    <div class="cmd"><pre><code class="language-bash">npx tsc -p lessons/04-error-handling</code></pre></div>
+    <p>The reference answers are in <code>solution.ts</code>.</p>
+  </div>
+
+  <div class="box source">
+    <p class="box-title">Read next (primary source, about 10 minutes)</p>
+    <p><a href="https://effect.website/docs/v4/error-management/two-error-types">Effect docs: “Two Types of Errors”</a>, then <a href="https://effect.website/docs/v4/error-management/expected-errors">“Expected Errors”</a>. If you see a v3 name somewhere, check it against the official <a href="https://github.com/Effect-TS/effect/blob/main/migration/error-handling.md">error-handling migration page</a>. For quick lookup, use the <a href="../../reference/cheatsheet.html">course cheat sheet</a>.</p>
+  </div>
+
+  <div class="box ask">
+    <p class="box-title">Ask your teacher</p>
+    <p>Anything fuzzy? Ask in this chat. For example: “Should a database timeout be an expected error or a defect?” or “How do I wrap a library that throws?” Gray-area classification questions are exactly the kind worth discussing.</p>
+  </div>
+
+  <nav class="course-nav">
+    <a href="../03-building-programs/index.html">← Lesson 3: Building programs</a>
+    <a class="next" href="../05-dependency-injection/index.html">Lesson 5: Dependency injection →</a>
+  </nav>
+
+</main>
+<script src="../../assets/course.js"></script>
+</body>
+</html>
